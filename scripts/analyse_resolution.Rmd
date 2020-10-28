@@ -1,0 +1,77 @@
+---
+title: "Resolution analysis"
+author: "Liz Ing-Simmons"
+date: "06/09/2019"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r global_options, echo=FALSE}
+short=TRUE #if short==TRUE, do not echo code chunks
+debug=FALSE
+knitr::opts_chunk$set(fig.width=6, fig.height=6, dpi = 300,
+             echo=!short, warning=debug, message=debug, error= FALSE)
+pdf.options(useDingbats = FALSE)
+options(stringsAsFactors = FALSE)
+```
+
+```{r load_packages, cache = FALSE}
+library("dplyr")
+library("tidyr")
+library("readr")
+library("ggplot2")
+
+read_bed <- function(fn){
+  read_tsv(fn, col_names = c("chr", "start", "end", "name", "score", "strand"))
+}
+```
+
+```{r load_bed_files, cache=TRUE}
+## Load .bed files
+
+basedir <- here::here()
+sample_names <- c("mitotic", "nc14", "3-4h", 
+                  "control-nc14", "gd7-nc14", "Toll10B-nc14", "Tollrm910-nc14",
+                  "control-stg10", "gd7-stg10", "Toll10B-stg10", "Tollrm910-stg10")
+resolutions <- c("1kb", "2kb", "5kb", "10kb", "25kb")
+# , "50kb", "100kb", "250kb", 
+#                  "500kb","1mb")
+
+sample_names_expanded <- rep(sample_names, each = length(resolutions))
+resolutions_expanded <- rep(resolutions, length(sample_names))
+
+files <- file.path(basedir, "data", "hic", "merged", sample_names_expanded, "hic",
+                   paste0(sample_names_expanded, "_", resolutions_expanded, 
+                          "_marginals.bed"))
+files <- files[file.exists(files)]
+binned_beds <- lapply(files, read_bed)
+names(binned_beds) <- basename(files)
+binned_beds_df <- bind_rows(binned_beds, .id = "file") %>%
+  separate(file, into = c("sample", "resolution", "rest"), sep = "_", extra = "merge") %>%
+  select(-name, -strand, -rest)
+```
+
+## Lieberman-Aiden lab resolution assessment
+
+Rao, Huntley et al 2014 assess the number of bins with > 1000 contacts at different resolutions, and take the "maximum" resolution of the sample to be the resolution at which at least 80% of bins have > 1000 contacts. 
+
+```{r}
+binned_beds_df %>%
+  mutate(resolution = factor(resolution, levels = resolutions, ordered = TRUE)) %>%
+  group_by(sample, resolution) %>%
+  summarise(percent = 100* sum(score > 1000) / n()) %>%
+  spread(resolution, percent) %>%
+  knitr::kable(digits = 1)
+```
+
+Clemens' samples reach the 80% threshold at 2 kb, mine reach this threshold at 5 kb. 
+
+
+## Session info
+
+This report was generated at `r format(Sys.time(), "%X, %a %b %d %Y")`. 
+
+```{r}
+sessionInfo()
+```

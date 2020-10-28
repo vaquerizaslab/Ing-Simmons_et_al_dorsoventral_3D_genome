@@ -1,0 +1,204 @@
+import pandas as pd
+import itertools
+import glob
+import os
+import re
+
+shell.prefix("source ../micro-c/.micro-c_venv/bin/activate; ")
+
+configfile: "config.yaml"
+metadata = pd.read_csv(config["metadata"], sep="\t",
+    ).assign(sample=lambda row: (row['condition']+ "_" + row['replicate'])
+    ).set_index("sample")
+fastq_files = [re.sub(".gz", "", f) for f in
+               list(itertools.chain(*metadata.loc[:, metadata.columns.str.startswith('run')].values)) if not pd.isnull(f) ]
+
+fastq_id_dict = {re.sub(".fastq|.fq", "", f): f for f in fastq_files}
+
+SAMPLE_NAMES = metadata.index.tolist()
+RESOLUTIONS = ["500kb", "100kb", "50kb", "25kb", "10kb", "5kb", "2kb", "1kb"]
+microc_resolutions = ["500kb", "100kb", "50kb", "25kb", "10kb", "5kb", "2kb", "1kb", "500bp", "100bp"]
+chromosomes = ["2L", "2R", "3L", "3R", "4", "X", "Y"]
+
+merged_sample_names = ["control-nc14", "gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14",
+                       "control-stg10", "gd7-stg10", "Tollrm910-stg10", "Toll10B-stg10",
+                       "nc14", "3-4h"]
+
+possible_replicates = ["Rep1", "Rep2", "Rep3"]
+
+
+QUERY_SAMPLES = ["gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14", "3-4h"]
+REF_SAMPLES = ["control-nc14" for item in QUERY_SAMPLES] + ["nc14" for item in QUERY_SAMPLES]
+QUERY_SAMPLES = QUERY_SAMPLES + QUERY_SAMPLES
+
+REF_SAMPLES = REF_SAMPLES + ["control-nc14", "control-nc14", "control-stg10", "control-stg10", "control-stg10"]
+QUERY_SAMPLES = QUERY_SAMPLES + ["nc14", "control-stg10", "gd7-stg10", "Tollrm910-stg10", "Toll10B-stg10"]
+
+
+microc_metadata = pd.read_csv(config["microc_metadata"], sep="\t",
+    ).assign(sample=lambda row: (row['condition']+ "_" + row['replicate'])
+    ).set_index("sample")
+
+wildcard_constraints:
+    res = "|".join(microc_resolutions)
+
+###################
+# START RULES
+###################
+
+localrules: all
+
+rule all:
+    input:
+        "data/fastq/fastqc/multiqc_report.html",
+        "scripts/plot_stats.html",
+        "scripts/analyse_resolution.html",
+        # Hi-C
+        expand("data/hic/{sample_name}/hic/{sample_name}.hic", sample_name=SAMPLE_NAMES),
+        expand("data/hic/merged/{merged_sample_name}/hic/{merged_sample_name}_{res}.hic",
+            merged_sample_name = merged_sample_names, res=RESOLUTIONS),
+        expand("data/hic/cooler_files/{merged_sample_name}_{res}.mcool",
+            merged_sample_name = merged_sample_names, res="1kb"),
+        # Hi-C quality control
+        expand("data/hic/{sample}/hic/{sample}_100kb_{chr}.npy.txt",
+            chr = ["2L", "2R", "3L", "3R", "X", "all"], sample = SAMPLE_NAMES),
+        "data/hic/fanc_pca_100kb.pdf",
+        expand("data/hic/merged/{merged_sample_name}/hic/{merged_sample_name}_{res}_expected_values_all.txt",
+            merged_sample_name = merged_sample_names, res=RESOLUTIONS),
+        expand("data/hic/merged/{merged_sample_name}/hic/{merged_sample_name}_{res}_expected_values_per_chrom.txt",
+            merged_sample_name = merged_sample_names, res=RESOLUTIONS),
+        # loop aggregates
+        expand("figures/plot_published_loop_aggregates/{publication}_{sample}_{res}_aggregate.pdf",
+            publication=["cubenas-potts_2016", "eagen_2017", "stadler_2017"],
+            sample=merged_sample_names, res=["1kb", "2kb"]),
+        expand("figures/plot_published_loop_aggregates/{publication}_{sample}_{res}_loop_strengths.bedpe",
+            publication=["cubenas-potts_2016", "eagen_2017", "stadler_2017"],
+            sample=merged_sample_names, res=["1kb", "2kb"]),
+        # domain aggregates
+        expand("figures/plot_domain_aggregates/3-4h_paired_domains_{sample}_{res}_aggregate.pdf",
+            sample=merged_sample_names, res=["1kb", "2kb"]),
+        # compartments
+        expand("figures/compartment_aggregates/{merged_sample_name}_50kb_comp_aggregate_{n_percentiles}.pdf",
+            merged_sample_name=merged_sample_names, n_percentiles=[5, 10, 50, 100]),
+        # expand("figures/compartment_aggregates/{merged_sample_name}_50kb_masked_comp_aggregate_{n_percentiles}.pdf",
+        #     merged_sample_name=merged_sample_names, n_percentiles=[5, 10, 50, 100]),
+        expand("figures/compartment_aggregates/{merged_sample_name}_{res}_masked_collapsed_comp_aggregate_{n_percentiles}.pdf",
+            merged_sample_name=merged_sample_names, res=["50kb"], n_percentiles=[5, 10, 50, 100]),
+        # CHESS
+        "scripts/analyse_chess_comparisons_merged.html",
+        # figures
+        expand("figures/de_genes_regions/{rnaseq_comparison}_de_gene_regions_nc14.pdf",
+            rnaseq_comparison=["gd7_vs_tl10b", "gd7_vs_tlrm910", "tlrm910_vs_tl10b"]),
+        expand("figures/de_genes_regions/{rnaseq_comparison}_de_gene_regions_stg10.pdf",
+            rnaseq_comparison=["gd7_vs_tl10b", "gd7_vs_tlrm910", "tlrm910_vs_tl10b"]),
+        "figures/figure_1_panels/figure1_regions.pdf",
+        expand("figures/figure_4_panels/{name}.pdf",
+            name=["twi", "sna", "if", "NetA", "sog", "Doc1", "pnr", "C15"] +
+            ["2L_example", "2R_example", "3L_example", "3R_example", "3R_example2", "X_example"]),
+        # expand("figures/figure_5_panels/{name}.pdf",
+        #     name=["twi", "sna", "if", "NetA", "sog", "Doc1", "pnr", "C15"]),
+        expand("figures/figure_3_panels/{merged_sample_name}_overview_figure.pdf",
+            merged_sample_name=merged_sample_names),
+        "figures/figure_1_panels/domain_size_gene_density_grbs.pdf",
+        "figures/figure_1_panels/koenecke_assigned_gene_expr_boxplots.pdf",
+        "figures/figure_1_panels/koenecke_domain_size_gene_density_grbs.pdf",
+        "figures/figure_1_panels/candidate_enhancers_histone_mods_chipseq_5kb.pdf",
+        expand("figures/whole_genome/{merged_sample_name}_{res}_wholegenome.pdf",
+            merged_sample_name=merged_sample_names, res="100kb"),
+        expand("figures/figure_stg10_panels/{name}.pdf",
+            name=["twi", "sna", "if", "NetA", "sog", "Doc1", "pnr", "C15"]),
+        #E-P loop aggregates
+        expand("figures/plot_ep_loop_aggregates/{loop_set}_{sample}_{res}_aggregate.pdf",
+            sample=merged_sample_names, res=["1kb", "2kb"],
+            loop_set=["gd7_csaw_ef_all", "gd7_csaw_ep_all", "Tollrm910_csaw_ef_all",
+                "Tollrm910_csaw_ep_all", "Toll10B_csaw_ef_all", "Toll10B_csaw_ep_all",
+                "gd7_csaw_pf_all", "Tollrm910_csaw_pf_all", "Toll10B_csaw_pf_all"]),
+        expand("figures/plot_ep_loop_aggregates/{loop_set}_{sample}_{res}_loop_strengths.bedpe",
+            sample=merged_sample_names, res=["1kb", "2kb"],
+            loop_set=["gd7_csaw_ef_all", "gd7_csaw_ep_all", "Tollrm910_csaw_ef_all",
+                "Tollrm910_csaw_ep_all", "Toll10B_csaw_ef_all", "Toll10B_csaw_ep_all",
+                "gd7_csaw_pf_all", "Tollrm910_csaw_pf_all", "Toll10B_csaw_pf_all"]),
+        # TF aggregates
+        expand("figures/TF_aggregates/hi-c_all_1.0K_over_{tf}_peak_pairs_{group}_10-shifts.pdf",
+            tf=["Sna", "CBP", "Trl", "Pc", "Dl", "Mad", "Twi", "Zen"],
+            group=["all", "diff_domain", "same_domain"]),
+            # , "100kb", "200kb", "500kb"]),
+        expand("figures/TF_aggregates/micro-c_all_1.6K_over_{tf}_peak_pairs_{group}_10-shifts.pdf",
+             tf=["Sna", "CBP", "Trl", "Pc", "Dl", "Mad", "Twi", "Zen"], 
+            group=["all", "diff_domain", "same_domain"]),
+            # , "100kb", "200kb", "500kb"]),
+        # Micro-C!
+        expand("data/micro-c/{sample}/hic/{sample}.hic", sample=["gd7_Rep1", "gd7_Rep2",
+            "control_Rep1", "control_Rep2", "control_Rep3", "control_Rep4"]),
+        # "data/micro-c/sample_alignment_stats_bwa.txt",
+        expand("data/micro-c/merged/{sample}/hic/{sample}_{res}_marginals.bed",
+            sample=["control", "gd7"], res=microc_resolutions),
+        expand("data/micro-c/cooler_files/{sample}_{res}.mcool",
+            sample=["control", "gd7"], res="100bp"),
+        expand("figures/plot_ep_loop_aggregates/{loop_set}_{sample}-micro-c_{res}_aggregate.pdf",
+            sample=["gd7", "control"], res=["1kb", "2kb"],
+            loop_set=["gd7_csaw_ef_all", "gd7_csaw_ep_all", "Tollrm910_csaw_ef_all",
+                "Tollrm910_csaw_ep_all", "Toll10B_csaw_ef_all", "Toll10B_csaw_ep_all",
+                "gd7_csaw_pf_all", "Tollrm910_csaw_pf_all", "Toll10B_csaw_pf_all"]),
+        expand("figures/plot_ep_loop_aggregates/{loop_set}_{sample}-micro-c_{res}_loop_strengths.bedpe",
+            sample=["gd7", "control"], res=["1kb", "2kb"],
+            loop_set=["gd7_csaw_ef_all", "gd7_csaw_ep_all", "Tollrm910_csaw_ef_all",
+                "Tollrm910_csaw_ep_all", "Toll10B_csaw_ef_all", "Toll10B_csaw_ep_all",
+                "gd7_csaw_pf_all", "Tollrm910_csaw_pf_all", "Toll10B_csaw_pf_all"]),
+        expand("figures/figure_microc_panels/{res}/{name}.pdf", 
+            name=["twi", "sna", "if", "NetA", "sog", "Doc1", "pnr", "C15"],
+            res=["100bp", "500bp", "1kb"]),
+        expand("data/micro-c/merged/{sample}/hic/{sample}_{res}_masked.cor",
+            sample=["gd7", "control"], res=["50kb"]),
+        expand("figures/figure_5_panels/{sample}_overview_figure.pdf",
+            sample=["gd7", "control"]),
+        expand("data/micro-c/merged/{sample}/hic/{sample}_{res}_expected_values_all.txt",
+            sample=["gd7", "control"], res=["10kb", "5kb", "2kb", "1kb", "500bp", "100bp"]),
+        expand("data/micro-c/merged/{sample}/hic/{sample}_{res}_expected_values_per_chrom.txt",
+            sample=["gd7", "control"], res=["10kb", "5kb", "2kb", "1kb", "500bp", "100bp"]),
+###################
+# FASTQ DATA QC
+###################
+
+rule touch_data:
+    output:
+        "data/fastq/{fastq}.gz"
+    shell:
+        "touch --no-create --no-dereference {output}"
+
+rule fastqc:
+    input:
+        lambda wildcards: f"data/fastq/{fastq_id_dict[wildcards.id]}.gz"
+    output:
+        "data/fastq/fastqc/{id}_fastqc.html",
+        "data/fastq/fastqc/{id}_fastqc.zip"
+    shell:
+        "fastqc -o data/fastq/fastqc/ -f fastq {input}"
+
+rule multiqc:
+    input:
+        expand("data/fastq/fastqc/{id}_fastqc.html", id = fastq_id_dict.keys())
+    output:
+        "data/fastq/fastqc/multiqc_report.html"
+    shell:
+        "multiqc -f -o data/fastq/fastqc data/fastq/fastqc/"
+
+include: "make_hi-c.smk"
+
+include: "hi-c_qc.smk"
+
+include: "process_merged_replicates.smk"
+
+include: "loops.smk"
+
+include: "insulation_domains.smk"
+
+include: "compartments.smk"
+
+include: "chess.smk"
+
+include: "figures.smk"
+
+include: "chip-seq_analysis.smk"
+
+include: "micro-c.smk"

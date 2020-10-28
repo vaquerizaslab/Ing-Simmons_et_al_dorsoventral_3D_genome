@@ -1,0 +1,285 @@
+---
+title: "ChIP-seq analysis of DV mutants"
+author: "Liz Ing-Simmons"
+date: "05/03/2020"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r global_options, echo=FALSE}
+knitr::opts_chunk$set(fig.width=6, fig.height=4, dpi = 300, out.width = "60%",
+             warning=FALSE, message=FALSE, error= FALSE, dev = c("png", "pdf"))
+pdf.options(useDingbats = FALSE)
+options(stringsAsFactors = FALSE)
+
+set.seed(20200116)
+
+colour_scheme <- c("PCNA-GFP" = "black", "w1118" = "grey",
+                   gd7 = "#648FFF", Tollrm910 = "#DC267F", tl10b = "#FFB000")
+basedir <- here::here()
+```
+
+```{r load_packages, cache = FALSE}
+# library("conflicted")
+library("dplyr")
+library("Rsamtools")
+library("rtracklayer")
+library("csaw")
+library("edgeR")
+library("ggplot2")
+library("BSgenome.Dmelanogaster.UCSC.dm6")
+Dmel <- Dmelanogaster
+seqlevelsStyle(Dmel) <- "Ensembl"
+```
+
+```{r functions}
+drop_windows <- function(windows, genome){
+  drop_idx <- end(windows) > seqlengths(genome)[as.character(seqnames(windows))] | start(windows) <= 0
+  message("Dropping ", sum(drop_idx), " ranges")
+  return(windows[!drop_idx])
+}
+
+# modified version 
+normOffsets <- function(object, ..., assay.id="counts", se.out=TRUE) 
+# Perform a fast loess normalization which uses the average count as the covariate, 
+# rather than the typical A-value-based methods to avoid instability at low abundances.
+#
+# written by Aaron Lun
+# created 19 November 2013
+{
+    mat <- assay(object, i=assay.id, withDimnames=FALSE)
+    nlibs <- ncol(mat)
+    nwin <- nrow(mat)
+
+    lib.sizes <- object$totals
+    if (is.null(lib.sizes)) {
+        stop("library sizes not present in 'object$totals'")
+    }
+
+    # Scaled corrections squeeze offsets towards relative log-library sizes.
+    # Constant value of `cont.cor' would squeeze them towards zero, which could be misleading.
+    cont.cor <- 0.5
+    cont.cor.scaled <- cont.cor * lib.sizes/mean(lib.sizes)
+		
+    # Using it as a prior.count for abundance ensures linearity with log-counts
+    ab <- aveLogCPM(mat, lib.size=lib.sizes, prior.count=cont.cor)/log2(exp(1))
+
+    # Computing the output mean.
+    mean.out <- NULL
+    if (is(se.out, "SummarizedExperiment")) { 
+        if (ncol(se.out)!=nlibs) {
+            stop("number of libraries differs between 'se.out' and 'object'")
+        }
+        if (!identical(se.out$totals, lib.sizes)) {
+            stop("library sizes of 'se.out' and 'object' are not identical")
+        }
+
+        mat2 <- assay(se.out, i=assay.id, withDimnames=FALSE)
+        mean.out <- aveLogCPM(mat2, lib.size=lib.sizes, prior.count=cont.cor)/log2(exp(1))
+
+        object <- se.out
+        se.out <- TRUE
+        nwin <- nrow(object)
+    }
+    
+    # Computing the offsets as log-differences from the average (implicit if the same average is used across libraries).
+    offs <- matrix(0, nwin, nlibs, byrow=TRUE)
+    for (x in seq_len(nlibs)) {
+    	fit <- loessFit(log(mat[,x]+cont.cor.scaled[x]), ab, ...)
+
+        if (is.null(mean.out)) {
+            offs[,x] <- fit$fitted 
+        } else {
+            offs[,x] <- spline(x=ab, y=fit$fitted, xout=mean.out)$y
+        }
+    }
+    offs <- offs - rowMeans(offs)
+
+    # Deciding what to return.
+    if (!se.out) { 
+        return(offs)
+    } else {
+        assay(object, "offset", withDimnames=FALSE) <- offs
+        return(object)
+    }
+}
+
+
+```
+
+In this analysis, I will identify differential H3K27ac ChIP-seq peaks between the different mutant embryos.
+
+## Load data and check quality
+
+```{r, cache=TRUE}
+bam_files1 <- list.files(file.path(basedir, "external_data/koenecke_2016_2017/chipseq_aligned/"),
+                         pattern = "H3K27.*mkdup.bam$", full.names = TRUE) %>% 
+  setNames(gsub("_sorted_filtered_mkdup.bam", "", basename(.)))
+
+bam_files2 <- list.files(file.path(basedir, "external_data/extra_chip-seq/chipseq_aligned/"),
+                          pattern = "H3K27.*mkdup.bam$", full.names = TRUE) %>% 
+   setNames(gsub("_sorted_filtered_mkdup.bam", "", basename(.)))
+
+bam_files <- c(bam_files1, bam_files2)
+
+blacklist <- import(file.path(basedir, "external_data/blacklist/Blacklist/lists/dm6-blacklist.v2.bed"))
+chrs_to_use <- c("2L", "2R", "3L", "3R", "4", "X")
+param <- readParam(minq = 30, discard = blacklist, restrict = chrs_to_use)
+
+```
+
+
+```{r, cache=TRUE}
+# diagnostics <- lapply(bam_files, function(bam){
+#   total <- countBam(bam)$records
+#   mapped <- countBam(bam, param=ScanBamParam(
+#       flag=scanBamFlag(isUnmapped=FALSE)))$records
+#   marked <- countBam(bam, param=ScanBamParam(
+#       flag=scanBamFlag(isUnmapped=FALSE, isDuplicate=TRUE)))$records
+#   return(c(Total=total, Mapped=mapped, Marked=marked))
+# })
+# 
+# diagnostics <- data.frame(do.call(rbind, diagnostics)) %>% 
+#   mutate(percent_mapped = Mapped/Total*100,
+#          percent_dup = Marked/Mapped*100)
+# diagnostics
+```
+
+
+```{r, cache=TRUE}
+h3k27ac_bam_files <- bam_files[grep("H3K27ac", names(bam_files))]
+
+x <- correlateReads(h3k27ac_bam_files, param=reform(param, dedup=TRUE))
+frag.len <- maximizeCcf(x)
+frag.len
+
+
+plot(1:length(x)-1, x, xlab="Delay (bp)", ylab="CCF", type="l")
+abline(v=frag.len, col="red")
+text(x=frag.len, y=min(x), paste(frag.len, "bp"), pos=4, col="red")
+
+```
+
+## H3K27ac
+
+- count reads in bins, and filter out bins with low enrichment
+
+```{r, cache=TRUE}
+h3k27ac_window_counts <- windowCounts(h3k27ac_bam_files, param=param, 
+                                      width=150, ext=frag.len,
+                                      BPPARAM=BiocParallel::MulticoreParam(8))
+
+## remove low-coverage regions by filtering for those that have at least a 3-fold increase above background
+h3k27ac_broad_window_counts <- windowCounts(h3k27ac_bam_files, bin = TRUE,
+                                            param=param, width=2000, 
+                                            ext=frag.len, BPPARAM=BiocParallel::MulticoreParam(8))
+filter.stat <- filterWindowsGlobal(h3k27ac_window_counts, h3k27ac_broad_window_counts)
+
+min.fc <- 2.5
+keep <- filter.stat$filter > log2(min.fc)
+summary(keep)
+
+h3k27ac_filtered_windows <- h3k27ac_window_counts[keep,]
+```
+
+### Quality control
+
+- set up design matrix
+- calculate normalisation factors
+- check sample clustering
+- check dispersion and fit
+
+```{r, cache=TRUE}
+# design matrix
+celltype <- sapply(names(h3k27ac_bam_files), function(x) base::strsplit(x, "_")[[1]][2])
+celltype <- factor(celltype)
+design <- model.matrix(~0+celltype)
+colnames(design) <- levels(celltype)
+design
+
+# normalisation for sample-specific trends
+h3k27ac_filtered_windows <- normOffsets(h3k27ac_filtered_windows)
+h3k27ac_norm.adjc <- calculateCPM(h3k27ac_filtered_windows, use.offsets=TRUE)
+
+plotMDS(h3k27ac_norm.adjc, labels=celltype,
+    col=colour_scheme[as.character(celltype)])
+
+# convert to DGEList for edgeR
+h3k27ac_dgelist <- asDGEList(h3k27ac_filtered_windows)
+h3k27ac_dgelist <- estimateDisp(h3k27ac_dgelist, design)
+plotBCV(h3k27ac_dgelist)
+h3k27ac_fit <- glmQLFit(h3k27ac_dgelist, design, robust=TRUE)
+plotQLDisp(h3k27ac_fit)
+```
+
+### Call differential peaks
+
+```{r, cache=TRUE}
+sample_names <- colnames(design)
+contrast_names <- c(paste0(sample_names[1], "-", sample_names[2]),
+               paste0(sample_names[1], "-", sample_names[3]),
+               paste0(sample_names[2], "-", sample_names[3]))
+
+# testing
+# looping over contrasts
+test_contrast <- function(contrast_name){
+ message(contrast_name)
+  c <- makeContrasts(contrasts = contrast_name, levels=colnames(design))
+  message(c)
+  results <- glmQLFTest(h3k27ac_fit, contrast=c)
+  m <- mergeResults(h3k27ac_filtered_windows, results$table, tol=100, 
+    merge.args=list(max.width=5000))
+  return(m)
+}
+
+h3k27ac_results_list <- lapply(contrast_names, test_contrast)
+names(h3k27ac_results_list) <- contrast_names
+lapply(h3k27ac_results_list, function(r){
+  sig <- r$combined$FDR < 0.05
+  table(r$combined$direction[sig])
+})
+
+
+results_to_gr <- function(merged, filtered.data){
+  ranges <- merged$regions
+  mcols(ranges) <- DataFrame(merged$combined,
+    best.logFC = merged$best$rep.logFC)
+  return(ranges)
+}
+
+h3k27ac_results_ranges <- lapply(h3k27ac_results_list, results_to_gr, 
+                                 filtered.data = h3k27ac_filtered_windows)
+
+h3k27ac_results_ranges <- lapply(h3k27ac_results_ranges, function(gr){
+  gr <- gr[gr$FDR < 0.05]
+  gr <- gr[gr$direction != "mixed"]
+  gr <- gr[order(gr$best.logFC)]
+  return(gr)
+})
+
+```
+
+## Export results
+
+```{r, cache=TRUE}
+lapply(names(h3k27ac_results_ranges), function(n){
+  for (direction in c("up", "down")){
+    gr <- h3k27ac_results_ranges[[n]]
+    out_file <- paste0("h3k27ac", "_", n, "_", direction, ".bed")
+    export.bed(gr[gr$direction == direction], 
+               con = file.path(basedir, "data/differential_chipseq", out_file))
+  }
+})
+```
+
+
+# Session info
+
+This report was generated at `r format(Sys.time(), "%X, %a %b %d %Y")`. 
+
+```{r}
+sessionInfo()
+```

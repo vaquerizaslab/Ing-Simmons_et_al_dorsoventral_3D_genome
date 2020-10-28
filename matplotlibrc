@@ -1,0 +1,4 @@
+backend: Agg
+font.family: sans-serif
+font.sans-serif: Helvetica, DejaVu Sans, Bitstream Vera Sans, Lucida Grande, Verdana, Geneva, Lucid, Arial, Avant Garde, sans-serif
+pdf.fonttype: 42 # Output Type 3 (Type3) or Type 42 (TrueType)

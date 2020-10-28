@@ -1,0 +1,320 @@
+---
+title: "Hi-C statistics"
+output: 
+  html_document:
+    toc: true
+    toc_float: false
+    code_folding: hide
+---
+
+```{r global_options, echo=FALSE}
+knitr::opts_chunk$set(fig.width=6, fig.height=6, dpi = 300, message = FALSE)
+pdf.options(useDingbats = FALSE)
+options(stringsAsFactors = FALSE)
+  
+basedir <- here::here()
+colour_scheme <- c("#648FFF", "#DC267F", "#FFB000")
+
+```
+
+```{r load_packages, cache = FALSE}
+library("readr")
+library("dplyr")
+library("tidyr")
+library("ggplot2")
+```
+
+## Alignment statistics (BWA, no iterative mapping)
+
+```{r get_alignment_stats_bwa, cache=TRUE}
+sample_levels <-c("mitotic_Rep1", "mitotic_Rep2", "nc14_Rep1","nc14_Rep2", "nc14_Rep3",
+                  "3-4h_Rep1", "3-4h_Rep2", "3-4h_Rep3", 
+                  "control-nc14_Rep1", "control-nc14_Rep2",  "gd7-nc14_Rep1", "gd7-nc14_Rep2", 
+                  "Tollrm910-nc14_Rep1", "Tollrm910-nc14_Rep2", "Toll10B-nc14_Rep1", "Toll10B-nc14_Rep2",
+                  "control-stg10_Rep1", "control-stg10_Rep2", "gd7-stg10_Rep1", "gd7-stg10_Rep2", 
+                  "Tollrm910-stg10_Rep1", "Tollrm910-stg10_Rep2", "Toll10B-stg10_Rep1", "Toll10B-stg10_Rep2")
+sample_levels2 <-c("mitotic", "nc14", "3-4h", "control-nc14", "gd7-nc14", 
+                   "Tollrm910-nc14", "Toll10B-nc14", "control-stg10", "gd7-stg10",
+                   "Tollrm910-stg10", "Toll10B-stg10")
+
+stats_bwa <- read_tsv(file.path(basedir, "data", "sample_alignment_stats_bwa.txt")) %>%
+  tibble::set_tidy_names(syntactic = TRUE) %>% 
+  dplyr::mutate(sample_name = factor(sample_name, levels = sample_levels))
+
+stats_summarised_bwa <- stats_bwa %>%
+  group_by(sample_name, condition, replicate, Read) %>%
+  summarise(fastq_records = sum(fastq_records),
+            bam_records = sum(bam_records)) %>%
+  mutate(frac_aligned = bam_records / fastq_records)
+
+```
+
+```{r plot_alignment_stats_bwa, fig.width=9, fig.height=6, out.width="60%"}
+ggplot(stats_summarised_bwa, aes(x = sample_name, y = fastq_records, fill = as.character(Read))) +
+  geom_col(position = "dodge") +
+  theme_bw(base_size = 16) +
+  scale_y_continuous("Number of reads", labels = scales::unit_format(unit = "M", scale = 1e-6, digits = 2)) +
+  scale_x_discrete("") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  scale_fill_manual("Read", values = c("black", "grey"))
+
+ggplot(stats_summarised_bwa, aes(x = sample_name, y = frac_aligned, fill = as.character(Read))) +
+  geom_col(position = "dodge") +
+  theme_bw(base_size = 16) +
+  scale_y_continuous("% of reads aligned", labels = scales::percent, limits = c(0, 1)) +
+  scale_x_discrete("") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  scale_fill_manual("Read", values = c("black", "grey"))
+```
+
+```{r}
+stats_summarised_bwa %>%
+  ungroup() %>%
+  dplyr::select(-condition, -replicate) %>%
+  knitr::kable(digits = c(1, 1, 9, 9, 9, 3, 3), format.args = list(big.mark = ","))
+```
+
+## Hi-C cis-trans ratios
+
+```{r fig.width=6, fig.height=5, out.width="60%"}
+meta <- read.table(file.path(basedir, "metadata.txt"), 
+                  header = TRUE, sep = "\t") %>%
+  dplyr::rename(sample_name = sample) %>% 
+  dplyr::mutate(sample_name = factor(sample_name, levels = sample_levels))
+
+ct_files <- file.path(basedir, "data", "hic", meta$sample_name, paste0(meta$sample_name, "_cis_trans_ratio.txt"))
+names(ct_files) <- meta$sample_name
+
+ct_ratios <- lapply(ct_files, read_tsv) %>%
+  bind_rows(.id = "sample_name") %>%
+  separate(sample_name, into = c("condition", "replicate"), sep = "_") %>% 
+  dplyr::mutate(condition = factor(condition, levels = sample_levels2))
+
+ggplot(ct_ratios, aes(x = condition, y = ratio, colour = replicate)) +
+  geom_jitter(size = 3, width =  0.2, height = 0) +
+  theme_bw(base_size = 16) +
+  scale_colour_manual("", values = colour_scheme) +
+  scale_x_discrete("") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  ylim(0.5, 1) +
+  NULL
+  
+knitr::kable(ct_ratios)
+```
+
+## Hi-C local-distal cis interaction ratios
+
+
+```{r fig.width=6, fig.height=6, out.width="60%"}
+ld_files <- file.path(basedir, "data", "hic", meta$sample_name, paste0(meta$sample_name, "_cis_local_ratio.txt"))
+names(ld_files) <- meta$sample_name
+
+ld_ratios <- lapply(ld_files, read_tsv) %>%
+  bind_rows(.id = "sample_name") %>%
+  separate(sample_name, into = c("condition", "replicate"), sep = "_") %>% 
+  dplyr::mutate(condition = factor(condition, levels = sample_levels2))
+
+ggplot(ld_ratios, aes(x = condition, y = ratio, colour = replicate)) +
+  geom_jitter(size = 3, width =  0.2, height = 0) +
+  theme_bw(base_size = 16) +
+  scale_colour_manual("", values = colour_scheme) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  scale_x_discrete("") +
+  ylim(0, 0.5) +
+  NULL
+  
+knitr::kable(ld_ratios)
+```
+
+## Hi-C pairs filtering statistics
+
+```{r fig.width=8, fig.height=8}
+stats_files <- file.path(basedir, "data", "hic", meta$sample_name, paste0(meta$sample_name, "_hic_stats.txt"))
+names(stats_files) <- meta$sample_name
+read_stats <- function(fn){
+  df <- read.csv(fn, header = FALSE, col.names = c("run", "property", "count"), 
+                 stringsAsFactors = FALSE)
+}
+
+stats <- lapply(stats_files, read_stats) %>%
+  bind_rows() %>%
+  mutate(run = gsub(".pairs", "", run)) %>%
+  separate(run, into = c("condition", "replicate", "run"), sep = "_") %>% 
+  dplyr::mutate(condition = factor(condition, levels = sample_levels2)) %>%
+  mutate(run = replace_na(run, "0")) %>%
+  mutate(property = factor(property, levels = c("total", "valid", "PCR duplicates",
+                                                "inward ligation error", "outward ligation error", 
+                                                "self-ligations", "restriction site distance")))
+
+```
+
+```{r  fig.width=6, fig.height=9}
+
+stats %>% dplyr::select(condition, replicate, run, property, count) %>%
+  spread(key = property, value = count) %>%
+  arrange(condition, replicate) %>%
+  knitr::kable(format.args = list(big.mark = ","))
+
+stats %>%
+  group_by(condition, replicate, run) %>%
+  mutate(percent_count = scales::percent(count / max(count))) %>%
+  filter(property != "total") %>%
+  dplyr::select(condition, replicate, run, property, percent_count) %>%
+  spread(key = property, value = percent_count) %>%
+  arrange(condition, replicate, run) %>%
+  knitr::kable()
+
+```
+
+## Combined sequencing runs
+
+```{r, fig.width = 14, fig.height = 10}
+stats_summary <- stats %>% group_by(condition, replicate, property) %>%
+  summarise(count = sum(count))
+
+ggplot(stats_summary, aes(x = property, y = count)) +
+  geom_col(position = "stack") +
+  facet_grid(replicate~condition) +
+  theme_bw(base_size = 14) +
+  scale_y_continuous("Number of read pairs", labels = scales::unit_format(unit = "M", scale = 1e-6, digits = 2)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_x_discrete("") +
+  NULL
+
+stats_summary %>%
+  group_by(condition, replicate) %>%
+  mutate(percent_count = count / max(count)) %>%
+  filter(property != "total") %>%
+  ggplot(aes(x = property, y = percent_count)) +
+  geom_col(position = "stack") +
+  facet_grid(replicate~condition) +
+  theme_bw() +
+  scale_y_continuous("Percentage read pairs remaining", labels = scales::percent) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_x_discrete("") +
+  NULL
+
+stats_summary %>% dplyr::select(condition, replicate, property, count) %>%
+  spread(key = property, value = count) %>%
+  arrange(condition, replicate) %>%
+  knitr::kable(format.args = list(big.mark = ","))
+
+stats_summary %>%
+  group_by(condition, replicate) %>%
+  mutate(percent_count = scales::percent(count / max(count))) %>%
+  filter(property != "total") %>%
+  dplyr::select(condition, replicate, property, percent_count) %>%
+  spread(key = property, value = percent_count) %>%
+  arrange(condition) %>%
+  knitr::kable()
+```
+
+## Combined sequencing runs with original reads
+
+```{r, fig.width = 20, fig.height = 10}
+stats_summary <- stats_summarised_bwa %>% 
+  ungroup() %>% 
+  dplyr::select(condition, replicate, Read, fastq_records, bam_records) %>% 
+  group_by(condition, replicate) %>% 
+  dplyr::filter(bam_records == min(bam_records)) %>% 
+  tidyr::gather(key = "property", value = "count", fastq_records, bam_records) %>% 
+  bind_rows(stats) %>% 
+  group_by(condition, replicate, property) %>%
+  summarise(count = sum(count)) %>%
+  ungroup() %>% 
+  mutate(property = case_when(property == "fastq_records" ~ "read pairs",
+                              property == "bam_records" ~ "aligned",
+                              property == "total" ~ "successfully paired",
+                              property == "valid" ~ "valid pairs",
+                              TRUE ~ property)) %>% 
+  mutate(property = factor(property, levels = c("read pairs", "aligned", "successfully paired", 
+                                                "valid pairs", "PCR duplicates",
+                                                "inward ligation error", "outward ligation error", 
+                                                "self-ligations", "restriction site distance"))) %>% 
+  dplyr::mutate(condition = factor(condition, levels = sample_levels2))
+
+  
+
+ggplot(stats_summary, aes(x = property, y = count)) +
+  geom_col(position = "stack") +
+  facet_grid(replicate~condition) +
+  theme_bw(base_size = 18) +
+  scale_y_continuous("Number of read pairs", labels = scales::unit_format(unit = "M", scale = 1e-6, digits = 2)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  # theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_x_discrete("") +
+  NULL
+
+percent_summary <- stats_summary %>%
+  group_by(condition, replicate) %>%
+  mutate(percent_count = count / max(count)) %>%
+  filter(property != "total")
+
+valid_pairs_percent <- percent_summary %>% 
+  dplyr::filter(property=="valid pairs") %>% 
+  dplyr::mutate(label = paste0(signif(100 * percent_count, 2), " %"))
+
+ggplot(percent_summary, aes(x = property, y = percent_count)) +
+  geom_col(position = "stack") +
+  geom_hline(data = valid_pairs_percent, aes(yintercept = percent_count), linetype = 2, colour = colour_scheme[1]) +
+  geom_label(data = valid_pairs_percent, aes(label = label, y = percent_count + 0.07, x = 8), size = 5, fontface = "bold") +
+  facet_grid(replicate~condition) +
+  theme_bw(base_size = 18) +
+  scale_y_continuous("Percentage read pairs remaining", labels = scales::percent) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  # theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  scale_x_discrete("") +
+  NULL
+
+stats_summary %>% dplyr::select(condition, replicate, property, count) %>%
+  spread(key = property, value = count) %>%
+  arrange(condition, replicate) %>%
+  knitr::kable(format.args = list(big.mark = ","))
+
+stats_summary %>%
+  group_by(condition, replicate) %>%
+  mutate(percent_count = scales::percent(count / max(count))) %>%
+  filter(property != "read pairs") %>%
+  dplyr::select(condition, replicate, property, percent_count) %>%
+  spread(key = property, value = percent_count) %>%
+  arrange(condition) %>%
+  knitr::kable()
+
+
+stats_summary %>% dplyr::select(condition, replicate, property, count) %>%
+  spread(key = property, value = count) %>%
+  group_by(condition) %>% 
+  summarise("total reads" = sum(`read pairs`),
+    "total valid pairs" = sum(`valid pairs`)) %>%
+  mutate("percent valid" = scales::percent(`total valid pairs`/ `total reads`)) %>%
+  arrange(condition) %>%
+  knitr::kable(format.args = list(big.mark = ","))
+```
+
+## Supplementary Table
+
+```{r}
+table_s3 <- stats_summary %>% dplyr::select(condition, replicate, property, count) %>%
+  spread(key = property, value = count) %>%
+  filter(condition %in% c("control-nc14", "gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14")) %>% 
+  group_by(condition, replicate) %>% 
+  summarise("total reads" = sum(`read pairs`),
+    "total valid pairs" = sum(`valid pairs`)) %>%
+  mutate("percent valid" = scales::percent(`total valid pairs`/ `total reads`)) %>%
+  left_join(select(ct_ratios, condition, replicate, "cis-trans ratio" = ratio)) %>% 
+  left_join(select(ld_ratios, condition, replicate, "local-distal ratio" = ratio)) %>% 
+  mutate(condition = gsub("-nc14", "", condition)) %>% 
+  arrange(condition) 
+table_s3 %>%
+  knitr::kable(format.args = list(big.mark = ","))
+
+writexl::write_xlsx(table_s3, path = file.path(basedir, "data/supplementary_tables/TableS3_Hi-C_statistics.xlsx"))
+```
+
+## Session info
+
+This report was generated at `r format(Sys.time(), "%X, %a %b %d %Y")`. 
+
+```{r}
+sessionInfo()
+```

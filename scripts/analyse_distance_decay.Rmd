@@ -1,0 +1,311 @@
+---
+title: "Distance decay analysis"
+author: "Liz Ing-Simmons"
+date: "11/12/2018"
+output: 
+  html_document:
+    toc: true
+    toc_float: false
+    code_folding: hide
+---
+
+```{r global_options, echo=FALSE}
+knitr::opts_chunk$set(fig.width=6, fig.height=6, dpi = 300, message = FALSE)
+pdf.options(useDingbats = FALSE)
+options(stringsAsFactors = FALSE)
+
+# colour_scheme <- c(gd7 = "#648FFF", nc14 = "#785EF0", Tollrm910 ="#DC267F", "3-4h" = "#FE6100", Toll10B = "#FFB000", "mitotic" = "black")
+colour_scheme <- c(gd7 = "#648FFF",  Tollrm910 ="#DC267F", Toll10B = "#FFB000", "control" = "black")
+# colour_scheme <- c("#648FFF", "#DC267F", "#FFB000")
+```
+
+```{r load_packages, cache = FALSE}
+library("dplyr")
+library("tidyr")
+library("ggplot2")
+```
+
+The aim of this analysis is to assess distance decay patterns for Hi-C data for gd7, Tollrm9/10, and Toll10B mutant embryos at nc14. 
+
+The distance decay is calculated as the average number of contacts at each distance between bins (using kaic). Here I'm plotting raw distance decay values. 
+
+```{r, fig.width = 7, fig.height = 5, out.width="60%"}
+basedir <- "~/cluster/dorsal_ventral/for_paper/"
+meta <- read.table(file.path(basedir, "metadata.txt"), sep = "\t", header = TRUE)
+meta <- filter(meta, condition != "mitotic")
+sample_names <- unique(meta$condition)
+
+distance_decay_files <- file.path(basedir, "data", "hic", "merged", sample_names, "hic",
+                                  paste0(sample_names, "_1kb_expected_values_all.txt"))
+
+distance_decays <- lapply(distance_decay_files, readr::read_tsv) %>%
+  setNames(sample_names) %>%
+  bind_rows(.id = "sample") 
+# %>%
+#   extract(sample, into = c("sample", "replicate"), regex = "([[:alnum:]]+)_Rep([[:alnum:]]+)") %>%
+#   mutate(sample = ifelse(sample == "4h", "3-4h", sample))
+
+distance_decays <- distance_decays %>% 
+  dplyr::filter(grepl("-stg10|-nc14|3-4h", sample)) %>% 
+  tidyr::separate(sample, sep = "-", into = c("genotype", "stage")) %>% 
+  mutate(stage = ifelse(stage == "4h", "3-4h", stage),
+         genotype = ifelse(genotype == "3", "control", genotype))
+
+ggplot(distance_decays, aes(x = distance, y = expected, colour = genotype)) +
+  geom_line(size = 1) +
+  scale_x_log10("Distance", breaks = c(10^4, 10^5, 10^6, 10^7), labels = c("10 kb", "100 kb", "1 Mb", "10 Mb")) +
+  scale_y_log10("Expected contacts") +
+  scale_color_manual(values = colour_scheme) +
+  theme_bw(base_size = 12) +
+  facet_wrap(~stage)
+
+```
+
+Here I'm plotting smoothed distance decay, using spline smoothing with `spar = 1` and `tol = 0.0005`, and the derivative of the smoothed curve. This is calculated after taking the log10 of both distances and expected values. This is based on what Benjamin has used, and the values are determined empirically to produce smooth curves that show the overall pattern without noise (and in comparison to published examples). 
+
+```{r, fig.width = 7, fig.height = 3, out.width="60%"}
+distance_decays_log10 <- distance_decays %>%
+  mutate(distance = log10(distance), expected = log10(expected)) %>%
+  dplyr::filter(!(is.infinite(distance) | is.infinite(expected)))
+# 
+# ggplot(distance_decays_log10, aes(x = distance, y = expected, colour = sample, linetype = replicate)) +
+#   geom_line(size = 1) +
+#   theme_bw(base_size = 16) +
+#   scale_x_continuous("Distance", breaks = c(4, 5, 6, 7), labels = c("10 kb", "100 kb", "1 Mb", "10 Mb")) +
+#   scale_y_continuous("Expected contacts (log10)") +
+#   scale_color_manual(values = colour_scheme)
+
+predict_deriv <- function(x, y, model){
+  model <- smooth.spline(x = x, y = y, spar=1, tol = 0.0005)
+  predict(model, x = x, deriv = 1)$y
+}
+
+predict_smooth <- function(x, y, model){
+  model <- smooth.spline(x = x, y = y, spar=1, tol = 0.0005)
+  predict(model, x = x)$y
+}
+
+distance_decays_log10_model <- distance_decays_log10 %>%
+  group_by(genotype, stage) %>%
+  mutate(deriv = predict_deriv(distance, expected),
+         smooth = predict_smooth(distance, expected))
+
+ggplot(distance_decays_log10_model, aes(x = distance, y = smooth, colour = genotype)) +
+  geom_line(size = 1) +
+  theme_bw(base_size = 16) +
+  scale_x_continuous("Distance", breaks = c(4, 5, 6, 7), labels = c("10 kb", "100 kb", "1 Mb", "10 Mb")) +
+  scale_y_continuous("Expected contacts (smoothed, log10)") +
+  scale_color_manual(values = colour_scheme) +
+  facet_wrap(~stage)
+
+ggplot(distance_decays_log10_model, aes(x = distance, y = deriv, colour = genotype)) +
+  geom_line(size = 1) +
+  theme_bw(base_size = 16) +
+  scale_x_continuous("Distance", breaks = c(4, 5, 6, 7, 8), labels = c("10 kb", "100 kb", "1 Mb", "10 Mb", "100 Mb")) +
+  scale_y_continuous("Derivative of expected contacts") +
+  scale_color_manual(values = colour_scheme) +
+  facet_wrap(~stage)
+```
+
+# nc14
+
+```{r fig.width=6, fig.height=3}
+p_smooth <- distance_decays_log10_model %>% 
+  dplyr::filter(stage %in% c("nc14", "3-4h")) %>% 
+  ggplot(aes(x = distance, y = smooth, colour = genotype, linetype = stage)) +
+  geom_line(size = 1) +
+  theme_bw(base_size = 12) +
+  scale_x_continuous("Distance", breaks = c(3, 4, 5, 6, 7), labels = c("1kb", "10 kb", "100 kb", "1 Mb", "10 Mb")) +
+  scale_y_continuous("Expected contacts\n(smoothed, log10)") +
+  scale_linetype_manual(values = c("nc14" = "solid", "3-4h" = "dotted")) +
+  scale_color_manual(values = colour_scheme) + 
+  theme(legend.position = "none", panel.grid.minor = element_blank()) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+p_deriv <- distance_decays_log10_model %>% 
+  dplyr::filter(stage %in% c("nc14", "3-4h")) %>% 
+  ggplot(aes(x = distance, y = deriv, colour = genotype, linetype = stage)) +
+  geom_line(size = 1) +
+  theme_bw(base_size = 12) +
+  scale_x_continuous("Distance", breaks = c(3, 4, 5, 6, 7), labels = c("1kb", "10 kb", "100 kb", "1 Mb", "10 Mb")) +
+  scale_y_continuous("Derivative of\nexpected contacts") +
+  scale_color_manual(values = colour_scheme) + 
+  scale_linetype_manual(values = c("nc14" = "solid", "3-4h" = "dotted")) +
+  theme(legend.position = "none", panel.grid.minor = element_blank()) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+legend_b <- cowplot::get_legend(
+  p_smooth + 
+    guides(color = guide_legend(nrow = 1)) +
+    theme(legend.position = "bottom")
+)
+
+
+p_nc14 <- cowplot::plot_grid(cowplot::plot_grid(p_smooth, p_deriv), 
+                        legend_b, ncol = 1, rel_heights = c(1, .2))
+p_nc14
+
+pdf(file = "../figures/figure_3_panels/nc14_distance_decay.pdf",
+    width = 6, height = 3)
+p_nc14
+dev.off()
+```
+
+# Stage 10
+
+```{r fig.width=5, fig.height=2.5}
+p_smooth_stg10 <- distance_decays_log10_model %>% 
+  dplyr::filter(stage == "stg10") %>% 
+  ggplot(aes(x = distance, y = smooth, colour = genotype)) +
+  geom_line(size = 1) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous("Distance", breaks = c(3, 4, 5, 6, 7), labels = c("1kb", "10 kb", "100 kb", "1 Mb", "10 Mb")) +
+  scale_y_continuous("Expected contacts\n(smoothed, log10)") +
+  scale_color_manual(values = colour_scheme) + 
+  theme(legend.position = "none", panel.grid.minor = element_blank()) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+p_deriv_stg10 <- distance_decays_log10_model %>% 
+  dplyr::filter(stage == "stg10") %>% 
+  ggplot(aes(x = distance, y = deriv, colour = genotype)) +
+  geom_line(size = 1) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous("Distance", breaks = c(3, 4, 5, 6, 7), labels = c("1kb", "10 kb", "100 kb", "1 Mb", "10 Mb")) +
+  scale_y_continuous("Derivative of\nexpected contacts") +
+  scale_color_manual(values = colour_scheme) + 
+  theme(legend.position = "none", panel.grid.minor = element_blank()) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+legend_b <- cowplot::get_legend(
+  p_smooth_stg10 + 
+    guides(color = guide_legend(nrow = 1)) +
+    theme(legend.position = "bottom")
+)
+
+
+p_stg10 <- cowplot::plot_grid(cowplot::plot_grid(p_smooth, p_deriv), 
+                        legend_b, ncol = 1, rel_heights = c(1, .2))
+p_stg10
+
+pdf(file = "../figures/figure_3_panels/stg10_distance_decay.pdf",
+    width = 6, height = 3)
+p_stg10
+dev.off()
+```
+
+
+# Micro-C
+
+```{r}
+sample_names <- c("control", "gd7")
+
+distance_decay_files <- file.path(basedir, "data", "micro-c", "merged", sample_names, "hic",
+                                  paste0(sample_names, "_100bp_expected_values_all.txt"))
+
+distance_decays <- lapply(distance_decay_files, readr::read_tsv) %>%
+  setNames(sample_names) %>%
+  bind_rows(.id = "sample") 
+
+ggplot(distance_decays, aes(x = distance, y = expected, colour = sample)) +
+  geom_line(size = 1) +
+  scale_x_log10("Distance", breaks = c(10^2, 10^3, 10^4, 10^5, 10^6, 10^7), 
+                labels = c("100 bp", "1 kb", "10 kb", "100 kb", "1 Mb", "10 Mb")) +
+  scale_y_log10("Expected contacts") +
+  scale_color_manual(values = colour_scheme) +
+  theme_bw(base_size = 12) 
+
+distance_decays_log10 <- distance_decays %>%
+  mutate(distance = log10(distance), expected = log10(expected)) %>%
+  dplyr::filter(!(is.infinite(distance) | is.infinite(expected)))
+
+distance_decays_log10_model <- distance_decays_log10 %>%
+  group_by(sample) %>%
+  mutate(deriv = predict_deriv(distance, expected),
+         smooth = predict_smooth(distance, expected))
+
+ggplot(distance_decays_log10_model, aes(x = distance, y = smooth, colour = sample)) +
+  geom_line(size = 1) +
+  theme_bw(base_size = 16) +
+  scale_x_continuous("Distance", breaks = 2:8, 
+                labels = c("100 bp", "1 kb", "10 kb", "100 kb", "1 Mb", "10 Mb", "100 Mb")) +
+  scale_y_continuous("Expected contacts (smoothed, log10)") +
+  scale_color_manual(values = colour_scheme)
+
+ggplot(distance_decays_log10_model, aes(x = distance, y = deriv, colour = sample)) +
+  geom_line(size = 1) +
+  theme_bw(base_size = 16) +
+  scale_x_continuous("Distance", breaks = 2:8, 
+                labels = c("100 bp", "1 kb", "10 kb", "100 kb", "1 Mb", "10 Mb", "100 Mb")) +
+  scale_y_continuous("Derivative of expected contacts") +
+  scale_color_manual(values = colour_scheme)
+```
+```{r fig.width=6, fig.height=3}
+p_smooth <- distance_decays_log10_model %>% 
+  ggplot(aes(x = distance, y = smooth, colour = sample)) +
+  geom_line(size = 1) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous("Distance", breaks = 2:8, 
+                labels = c("100 bp", "1 kb", "10 kb", "100 kb", "1 Mb", "10 Mb", "100 Mb")) +
+  scale_y_continuous("Expected contacts\n(smoothed, log10)") +
+  scale_color_manual(values = colour_scheme) + 
+  theme(legend.position = "none", panel.grid.minor = element_blank()) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+p_deriv <- distance_decays_log10_model %>% 
+  ggplot(aes(x = distance, y = deriv, colour = sample)) +
+  geom_line(size = 1) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous("Distance", breaks = 2:8, 
+                labels = c("100 bp", "1 kb", "10 kb", "100 kb", "1 Mb", "10 Mb", "100 Mb")) +
+  scale_y_continuous("Derivative of\nexpected contacts") +
+  scale_color_manual(values = colour_scheme) + 
+  theme(legend.position = "none", panel.grid.minor = element_blank()) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+legend_b <- cowplot::get_legend(
+  p_smooth + 
+    guides(color = guide_legend(nrow = 1)) +
+    theme(legend.position = "bottom")
+)
+
+
+p_microc <- cowplot::plot_grid(cowplot::plot_grid(p_smooth, p_deriv), 
+                        legend_b, ncol = 1, rel_heights = c(1, .2))
+p_microc
+
+pdf(file = "../figures/figure_microc_panels/microc_distance_decay.pdf",
+    width = 6, height = 3)
+p_microc
+dev.off()
+```
+
+
+
+```{r fig.width=6, fig.height=4}
+legend_b <- cowplot::get_legend(
+  p_smooth_stg10 + 
+    guides(color = guide_legend(nrow = 1)) +
+    theme(legend.position = "bottom")
+)
+
+
+cowplot::plot_grid(cowplot::plot_grid(p_smooth, p_deriv, p_smooth_stg10, p_deriv_stg10, 
+                                      nrow = 2, align = "vh", axis = "lr"),
+                   legend_b, nrow = 2, rel_heights = c(2, .2))
+
+pdf(file = "../figures/figure_microc_panels/microc_stg10_distance_decay.pdf",
+    width = 6, height = 4)
+cowplot::plot_grid(cowplot::plot_grid(p_smooth, p_deriv, p_smooth_stg10, p_deriv_stg10, 
+                                      nrow = 2, align = "vh", axis = "lr"),
+                   legend_b, nrow = 2, rel_heights = c(2, .2))
+dev.off()
+```
+
+
+# Session info
+
+This report was generated at `r format(Sys.time(), "%X, %a %b %d %Y")`. 
+
+```{r}
+devtools::session_info()
+```

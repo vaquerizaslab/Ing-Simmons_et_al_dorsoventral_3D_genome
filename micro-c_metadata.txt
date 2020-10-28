@@ -1,0 +1,7 @@
+condition	replicate	run1_read1	run1_read2
+gd7	Rep1	gd7_All1_R1.fastq.gz	gd7_All1_R2.fastq.gz
+gd7	Rep2	gd7_All2_R1.fastq.gz	gd7_All2_R2.fastq.gz
+control	Rep1	nc14_1_R1.fastq.gz	nc14_1_R2.fastq.gz
+control	Rep2	nc14_2_R1.fastq.gz	nc14_2_R2.fastq.gz
+control	Rep3	nc14_3_R1.fastq.gz	nc14_3_R2.fastq.gz
+control	Rep4	PCNA_nc14_all_R1.fastq.gz	PCNA_nc14_all_R2.fastq.gz

@@ -1,0 +1,5 @@
+metadata: metadata.txt
+microc_metadata: micro-c_metadata.txt
+genome_idx: /home/research/vaquerizas/store/genomes/insects/Dmel/6.07/BWAIndex/genome
+genome_fasta: /home/research/vaquerizas/store/genomes/insects/Dmel/6.07/fasta/dmel-sanitized-chromosome-r6.07.fasta
+enzyme: MboI

@@ -1,0 +1,815 @@
+---
+title: "CHESS results analysis"
+author: "Liz Ing-Simmons"
+output: 
+  html_document:
+    toc: true
+    toc_float: false
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=6, fig.height=4, dev = "png", message = FALSE)
+pdf.options(useDingbats = FALSE)
+options(stringsAsFactors = FALSE)
+
+colour_scheme <- c("#648FFF", "#785EF0", "#DC267F", "#FE6100", "#FFB000")
+colour_scheme <- c("#648FFF", "#DC267F", "#FFB000")
+SN_category_colours = c("lightgrey", RColorBrewer::brewer.pal(4,"PuRd"))
+# names(SN_category_colours) <- c("<0.5", "0.5-1", "1-1.5", "1.5-2", "2+")
+
+colour_scheme <- c("nc14" = "grey", "gd7-nc14" = "#648FFF", "Tollrm910-nc14" = "#DC267F", 
+                   "Toll10B-nc14" = "#FFB000", "control-stg10" = "black",
+                   "gd7-stg10" = "#648FFF", "Tollrm910-stg10" = "#DC267F", 
+                   "Toll10B-stg10" = "#FFB000")
+
+colour_scheme2 <- c("nc14" = "black", "gd7-nc14" = "#648FFF", "Tollrm910-nc14" = "#DC267F", 
+                   "Toll10B-nc14" = "#FFB000", "control-stg10" = "black",
+                   "gd7-stg10" = "#648FFF", "Tollrm910-stg10" = "#DC267F", 
+                   "Toll10B-stg10" = "#FFB000")
+
+basedir <- here::here()
+```
+
+```{r load_packages, cache = FALSE, message=FALSE}
+library("dplyr")
+library("tidyr")
+library("ggplot2")
+library("GenomicRanges")
+library("AnnotationDbi")
+library("GenomicFeatures")
+```
+
+```{r functions}
+plot_ssim <- function(df){
+  p <- ggplot(df, aes(x = start, y = 1 - ssim)) +
+    geom_hline(aes(yintercept = 1 - ssim_threshold), linetype = 2) +
+    geom_line() +
+    geom_point(size = 1, aes(colour = sn_above_threshold)) +
+    theme_bw(base_size = 12) +
+    scale_colour_manual(values = SN_category_colours[c(1, 5)]) +
+    scale_x_continuous(labels = scales::unit_format(suffix = "Mb", scale = 1e-6, digits = 2)) +
+    facet_wrap(~chr, scales = "free_x") +
+    ggtitle(unique(df$comparison))
+  return(p)
+}
+
+# plot_ssim <- function(df){
+#   p <- ggplot(df, aes(x = start, y = 1 - ssim)) +
+#     geom_hline(yintercept = 0.7, linetype = 2) +
+#     geom_line() +
+#     geom_point(size = 1, aes(colour = SN_category)) +
+#     theme_bw(base_size = 12) +
+#     scale_colour_manual(values = SN_category_colours) +
+#     scale_x_continuous(labels = scales::unit_format(suffix = "Mb", scale = 1e-6, digits = 2)) +
+#     facet_wrap(~chr, scales = "free_x") +
+#     ggtitle(unique(df$comparison))
+#   return(p)
+# }
+
+reduce_chess_ranges <- function(df){
+  name <- unique(df$comparison)
+  gr <- makeGRangesFromDataFrame(df) %>%
+    reduce()
+  df_out <- as.data.frame(gr) %>%
+    mutate(comparison = name,
+           ID = as.character(gr))
+  return(df_out)
+}
+
+```
+
+# Load data
+
+```{r}
+TM3_breakpoints <- rtracklayer::import.bed("../external_data/ghavi-helm_2019/TM3_breakpoints.bed")
+
+TM3_breakpoints_df <- TM3_breakpoints %>% 
+  as.data.frame() %>% 
+  rename(seqnames = "chr") %>% 
+  tidyr::pivot_longer(cols = c(start, end), values_to = "pos") %>% 
+  dplyr::filter(!(width < 5000 & name == "end"))
+ 
+TM6_breakpoints <- readr::read_delim("../external_data/miller_2016/Table1_TM6_breakpoints.txt", 
+                              delim ="\t") %>% 
+  dplyr::mutate(width = abs(end-start)) %>% 
+  tidyr::pivot_longer(cols = c(start, end), values_to = "pos") %>% 
+  dplyr::filter(!(width < 5000 & name == "end"))
+
+breakpoints_df <- bind_rows(TM3_breakpoints_df, TM6_breakpoints) %>% 
+  dplyr::select(chr, pos) %>% 
+  arrange(chr, pos)
+ 
+```
+
+# Read CHESS results
+
+```{r read_chess}
+sample_names <- c("nc14", "gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14", 
+                  "control-stg10", "gd7-stg10", "Tollrm910-stg10", "Toll10B-stg10")
+ref <- c(rep("control-nc14", 5), rep("control-stg10", 3))
+comparisons <- paste0(ref, "_vs_", sample_names)
+
+chess_files <- list.files(file.path(basedir, "data", "chess", comparisons), full.names = TRUE, pattern = "genome_scan_100x_5kb.txt")
+names(chess_files) <- sapply(chess_files, function(path){
+  parts <- tail(strsplit(path, "/")[[1]], 2)
+  gsub(".txt|genome_scan", "", paste(parts, collapse = ""))
+})
+
+chess_comparisons_all <- lapply(chess_files, function(f){
+  read.table(f, sep = "\t", header = TRUE) 
+}) %>% bind_rows(.id = "comparison") %>%
+  separate(comparison, sep = "_", into = c("ref", "vs", "query", 
+                                           "window_size", "resolution"), remove = FALSE) %>%
+  dplyr::select(-vs) %>%
+  mutate(ref = factor(ref, levels = unique(ref)),
+         query = factor(query, levels = unique(sample_names))) %>%
+  dplyr::filter(!is.na(ssim))
+
+# add genomic position data
+
+pairs_files <- list.files(file.path(basedir, "data", "chess"), pattern = ".bedpe", full.names = TRUE)
+names(pairs_files) <-  gsub(".bedpe|dm6_pairs_", "", basename(pairs_files))
+
+comparison_regions <- lapply(pairs_files, function(f){
+  read.table(f, sep = "\t", 
+             col.names = c("chr", "start", "end", "chr2", "start2", "end2", 
+                           "ID", "score", "strand1", "strand2")) %>% 
+    dplyr::select(chr, start, end, ID)
+}) %>% bind_rows(.id = "params") %>%
+  separate(params, sep = "_", into = c("window_size", "resolution"))
+
+
+chess_comparisons_all <- left_join(chess_comparisons_all, comparison_regions)
+
+# add stage
+chess_comparisons_all <- chess_comparisons_all %>% 
+  mutate(stage = case_when(grepl("stg10", query) ~ "stg10",
+                                         TRUE ~ "nc14"))
+
+```
+
+
+# Load DE genes data
+
+* genes with a log2 fold change of at least 2 in any of the comparison between mutants
+
+```{r get_genes, cache=TRUE}
+transcriptome_gff <- "../../external_data/flybase/dmel-all-r6.30.gtf.gz"
+txdb <- GenomicFeatures::makeTxDbFromGFF(transcriptome_gff)
+k <- AnnotationDbi::keys(txdb, keytype = "TXNAME")
+tx2gene <- AnnotationDbi::select(txdb, keys = k, columns = "GENEID", keytype = "TXNAME")
+
+gene_locations <- AnnotationDbi::select(txdb, keys = k, 
+                                        columns = c("TXCHROM", "TXSTART", "TXEND", "TXSTRAND", "GENEID"), 
+                                        keytype = "TXNAME")
+transcripts_gr <- makeGRangesFromDataFrame(gene_locations, seqnames.field = "TXCHROM",
+                                     start.field = "TXSTART", end.field = "TXEND",
+                                     strand.field = "TXSTRAND", keep.extra.columns = TRUE)
+genes_gr <- genes(txdb)
+```
+
+```{r}
+# genes with a log2FC of at least 2
+de_genes_files <- list.files("../../external_data/koenecke_2016_2017/rnaseq_results/", 
+                             pattern = "padj005_log2foldchange1_results.txt", full.names = TRUE)
+names(de_genes_files) <- gsub("_padj005_log2foldchange1_results.txt", "", basename(de_genes_files))
+
+de_genes_tables <- lapply(de_genes_files, function(f){
+  read.table(f, sep = "\t", header = TRUE)
+  })
+
+for (n in names(de_genes_tables)){
+  mcols(genes_gr)[[n]] <- mcols(genes_gr)$gene_id %in% de_genes_tables[[n]]$gene_id
+}
+
+genes_gr$de_any <- genes_gr$tlrm910_vs_tl10b | genes_gr$gd7_vs_tl10b | genes_gr$gd7_vs_tlrm910
+
+gd7_up_ids <- intersect(filter(de_genes_tables$gd7_vs_tl10b, log2FoldChange > 0) %>%  pull(gene_id),
+                        filter(de_genes_tables$gd7_vs_tlrm910, log2FoldChange > 0) %>%  pull(gene_id))
+gd7_down_ids <- intersect(filter(de_genes_tables$gd7_vs_tl10b, log2FoldChange < 0) %>%  pull(gene_id),
+                        filter(de_genes_tables$gd7_vs_tlrm910, log2FoldChange < 0) %>%  pull(gene_id))
+
+tollrm910_up_ids <- intersect(filter(de_genes_tables$tlrm910_vs_tl10b, log2FoldChange > 0) %>%  pull(gene_id),
+                        filter(de_genes_tables$gd7_vs_tlrm910, log2FoldChange < 0) %>%  pull(gene_id))
+tollrm910_down_ids <- intersect(filter(de_genes_tables$tlrm910_vs_tl10b, log2FoldChange < 0) %>%  pull(gene_id),
+                        filter(de_genes_tables$gd7_vs_tlrm910, log2FoldChange > 0) %>%  pull(gene_id))
+
+toll10B_up_ids <- intersect(filter(de_genes_tables$tlrm910_vs_tl10b, log2FoldChange < 0) %>%  pull(gene_id),
+                        filter(de_genes_tables$gd7_vs_tl10b, log2FoldChange < 0) %>%  pull(gene_id))
+toll10B_down_ids <- intersect(filter(de_genes_tables$tlrm910_vs_tl10b, log2FoldChange > 0) %>%  pull(gene_id),
+                        filter(de_genes_tables$gd7_vs_tl10b, log2FoldChange > 0) %>%  pull(gene_id))
+
+genes_gr$gd7_up <- mcols(genes_gr)$gene_id %in% gd7_up_ids
+genes_gr$gd7_down <- mcols(genes_gr)$gene_id %in% gd7_down_ids
+genes_gr$tollrm910_up <- mcols(genes_gr)$gene_id %in% tollrm910_up_ids
+genes_gr$tollrm910_down <- mcols(genes_gr)$gene_id %in% tollrm910_down_ids
+genes_gr$toll10B_up <- mcols(genes_gr)$gene_id %in% toll10B_up_ids
+genes_gr$toll10B_down <- mcols(genes_gr)$gene_id %in% toll10B_down_ids
+
+genes_gr
+```
+
+## Compare CHESS scores to regions with DE genes
+
+* identify CHESS regions that contain DE genes in any comparison (based on overlap with any part of the gene body)
+* only considering nc14 here since that's what the RNA-seq data corresponds to
+* since these are large windows, almost all of them do contain DE genes
+
+```{r}
+chess_comparisons_nc14 <- filter(chess_comparisons_all, stage == "nc14")
+chess_comparisons_nc14$n_de_genes <- chess_comparisons_nc14 %>% 
+  makeGRangesFromDataFrame() %>% 
+  countOverlaps(., genes_gr[genes_gr$de_any])
+
+chess_comparisons_nc14$has_de_genes <- chess_comparisons_nc14$n_de_genes > 0
+
+summary(chess_comparisons_nc14$has_de_genes)
+chess_comparisons_nc14$de_gene_group <- cut(chess_comparisons_nc14$n_de_genes, 
+                                            c(0, 0.5, 3.5, 5.5, 7.5, 17), 
+                                            labels = c("0", "1-3", "4-5", "5-7", "8+"),
+                                            include.lowest = TRUE)
+
+chess_comparisons_nc14$gd7_up <- chess_comparisons_nc14 %>% 
+  makeGRangesFromDataFrame() %>% 
+  countOverlaps(., genes_gr[genes_gr$gd7_up]) > 0
+chess_comparisons_nc14$gd7_down <- chess_comparisons_nc14 %>% 
+  makeGRangesFromDataFrame() %>% 
+  countOverlaps(., genes_gr[genes_gr$gd7_down]) > 0
+
+chess_comparisons_nc14$tollrm910_up <- chess_comparisons_nc14 %>% 
+  makeGRangesFromDataFrame() %>% 
+  countOverlaps(., genes_gr[genes_gr$tollrm910_up]) > 0
+chess_comparisons_nc14$tollrm910_down <- chess_comparisons_nc14 %>% 
+  makeGRangesFromDataFrame() %>% 
+  countOverlaps(., genes_gr[genes_gr$tollrm910_down]) > 0
+
+chess_comparisons_nc14$toll10B_up <- chess_comparisons_nc14 %>% 
+  makeGRangesFromDataFrame() %>% 
+  countOverlaps(., genes_gr[genes_gr$toll10B_up]) > 0
+chess_comparisons_nc14$toll10B_down <- chess_comparisons_nc14 %>% 
+  makeGRangesFromDataFrame() %>% 
+  countOverlaps(., genes_gr[genes_gr$toll10B_down]) > 0
+
+# chess_comparisons_nc14 <- chess_comparisons_nc14 %>% 
+#   mutate(gd7_genes = case_when(
+#     gd7_up & gd7_down ~ "Both",
+#     gd7_up ~ "Up",
+#     gd7_down ~ "Down",
+#     TRUE ~ "None"),
+#     Tollrm910_genes = case_when(
+#       tollrm910_up & tollrm910_down ~ "Both",
+#       tollrm910_up ~ "Up",
+#       tollrm910_down ~ "Down",
+#       TRUE ~ "None"),
+#     Toll10B_genes = case_when(
+#       toll10B_up & toll10B_down ~ "Both",
+#       toll10B_up ~ "Up",
+#       toll10B_down ~ "Down",
+#       TRUE ~ "None"))
+
+chess_comparisons_nc14 <- chess_comparisons_nc14 %>%
+  mutate(gd7_genes = case_when(
+      gd7_up | gd7_down ~ "DE",
+      TRUE ~ "None"),
+    Tollrm910_genes = case_when(
+      tollrm910_up | tollrm910_down ~ "DE",
+      TRUE ~ "None"),
+    Toll10B_genes = case_when(
+      toll10B_up | toll10B_down ~ "DE",
+      TRUE ~ "None"))
+
+
+
+de_genes_positions <- as.data.frame(genes_gr) %>% 
+  dplyr::filter(de_any) %>% 
+  dplyr::filter(seqnames %in% c("2L", "2R", "3L", "3R", "4", "X")) %>% 
+  rename(seqnames = "chr")
+```
+
+# Analysis - nc14
+
+* plot z-score across all chromosomes as an overview
+
+```{r fig.width = 6, fig.height = 6}
+chess_comparisons_nc14_smooth <- chess_comparisons_nc14 %>% 
+  mutate(midpoint = (start + end)/2) %>% 
+  dplyr::select(ref, query, chr, midpoint, SN, ssim, z_ssim) %>% 
+  group_by(query, chr) %>% 
+  arrange(midpoint) %>% 
+  mutate(z_ssim_smooth = zoo::rollapply(z_ssim, width = 20, FUN = mean, fill = NA))
+
+chess_smooth_all_chrs <- chess_comparisons_nc14_smooth %>% 
+  ggplot(aes(x = midpoint, y = z_ssim_smooth, colour = query)) +
+  annotate("rect", ymin = -2, ymax = 2, xmin = -Inf, xmax = Inf, fill = "grey", alpha = 0.6) + 
+  geom_line() +
+  geom_point(data = breakpoints_df, inherit.aes = FALSE, 
+             aes(x = pos), y = -2.5, shape = "*", size = 5) +
+  scale_color_manual(values = colour_scheme2) +
+  geom_rug(data = de_genes_positions, inherit.aes = FALSE, aes(x = start), 
+           length = unit(0.1, "npc"), alpha = 0.2) +
+  facet_wrap(~chr, nrow = 6, scales = "free_x", strip.position = "right") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(labels = scales::unit_format(unit = "Mb", scale = 10^-6)) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  labs(x = "", y = "ssim Z-score")
+
+chess_smooth_all_chrs
+```
+
+* calculate difference between ssim score of mutant comparison and ssim score of control comparison
+
+```{r}
+ref_chess <- chess_comparisons_nc14 %>% 
+  dplyr::filter(query == "nc14") %>% 
+  rename(ssim = "ref_ssim") %>% 
+  dplyr::select(chr, start, end, ref_ssim)
+
+mutant_chess <- chess_comparisons_nc14 %>% 
+  dplyr::filter(query %in% c("gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14"))
+
+mutant_chess <- left_join(mutant_chess, ref_chess) %>% 
+  mutate(ssim_diff = ssim - ref_ssim)
+
+```
+
+* plotting ssim differences for all chromosomes except chr 3
+
+```{r fig.width=3, fig.height=3}
+pvals <- mutant_chess %>% 
+  filter(chr %in% c("2L", "2R", "4", "X")) %>% 
+  group_by(query) %>% 
+  summarise(p = wilcox.test(ssim_diff[has_de_genes], ssim_diff[!has_de_genes])$p.value) %>% 
+  mutate(label = paste0("p = ", format.pval(p, digits = 1)))
+
+chess_boxplot <- mutant_chess %>% 
+  filter(chr %in% c("2L", "2R", "4", "X")) %>% 
+  ggplot(aes(y = ssim_diff, x = query, fill = has_de_genes)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_boxplot(notch = TRUE) +
+  geom_label(data = pvals, inherit.aes = FALSE, aes(x = query, label = label), 
+             y = 0.25, fill = "#FFFFFFB3", size = 3.5) +
+  scale_fill_manual("", values = c("white", "grey"), breaks = c(FALSE, TRUE), 
+                    labels = c("No DE genes", "Has DE genes")) +
+  scale_x_discrete(breaks = c("gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14"), 
+                   labels = c("gd7", "Tollrm910", "Toll10B")) +
+  scale_y_continuous(breaks = c(-0.4, -0.2, 0, 0.2), limits = c(-0.3, 0.3)) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  labs(x = "", y = "ssim(control, mutant) -\nssim(control, Hug et al. nc14)")
+
+chess_boxplot
+```
+
+* plotting ssim differences for all chromosomes
+
+```{r fig.width=3, fig.height=3}
+pvals <- mutant_chess %>% 
+  group_by(query) %>% 
+  summarise(p = wilcox.test(ssim_diff[has_de_genes], ssim_diff[!has_de_genes])$p.value) %>% 
+  mutate(label = paste0("p = ", format.pval(p, digits = 1)))
+
+mutant_chess %>% 
+  ggplot(aes(y = ssim_diff, x = query, fill = has_de_genes)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_boxplot(notch = TRUE) +
+  geom_label(data = pvals, inherit.aes = FALSE, aes(x = query, label = label), 
+             y = 0.25, fill = "#FFFFFFB3", size = 3.5) +
+  scale_fill_manual("", values = c("white", "grey"), breaks = c(FALSE, TRUE), 
+                    labels = c("No DE genes", "Has DE genes")) +
+  scale_x_discrete(breaks = c("gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14"), 
+                   labels = c("gd7", "Tollrm910", "Toll10B")) +
+  scale_y_continuous(breaks = c(-0.4, -0.2, 0, 0.2), limits = c(-0.3, 0.3)) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  labs(title = "All chromosomes", x = "", y = "ssim(control, mutant) -\nssim(control, Hug et al. nc14)")
+```
+
+* categorising windows by number of DE genes, not just 0/some
+
+```{r}
+## more DE gene categories
+mutant_chess %>% 
+  ggplot(aes(y = ssim_diff, x = query, fill = de_gene_group)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_violin() +
+  stat_summary(fun=median, geom="point", size=2, position=position_dodge(0.9)) +
+  # geom_boxplot(outlier.shape = NA) +
+  # geom_boxplot(notch = TRUE) +
+  scale_x_discrete(breaks = c("gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14"), 
+                   labels = c("gd7", "Tollrm910", "Toll10B")) +
+  scale_y_continuous(breaks = c(-0.4, -0.2, 0, 0.2), limits = c(-0.3, 0.3)) +
+  scale_fill_brewer(palette = "BuPu") + 
+  theme_bw(base_size = 12) +
+  theme(legend.position = "right", panel.grid.minor = element_blank()) +
+  labs(title = "All chromosomes", x = "", y = "ssim(control, mutant) -\nssim(control, Hug et al. nc14)",
+       fill = "Number of DE genes")
+```
+
+* taking only every 100th window, in order to get non-overlapping independent windows
+* also here only considering genes that are DE in the query genotype compared to both other genotypes (above I use genes that are DE in any comparison)
+
+```{r fig.width=3, fig.height=3}
+tmp <- mutant_chess %>% 
+  dplyr::select(query, chr, ID, ssim_diff, gd7_genes, Tollrm910_genes, Toll10B_genes) %>% 
+  gather(gd7_genes, Tollrm910_genes, Toll10B_genes, key = "comparison", value = "value") %>% 
+  tidyr::separate(query, into = c("query_genotype", "query_stage"), sep = "-", remove = FALSE) %>% 
+  tidyr::separate(comparison, into = c("genes_genotype", "extra"), sep = "_") %>%
+  mutate(same = query_genotype == genes_genotype) %>% 
+  filter(same) %>% 
+   filter((ID - 50) %% 100 == 0)
+# %>% 
+#   mutate(value = factor(value, levels = c("None", "Down", "Up", "Both")))
+
+pvals <- tmp %>% 
+  group_by(query) %>% 
+  summarise(p = t.test(ssim_diff[value == "None"], ssim_diff[value == "DE"])$p.value) %>% 
+  mutate(label = paste0("p = ", format.pval(p, digits = 2)))
+
+
+p_chess_boxplot_2 <- tmp %>% 
+  ggplot(aes(y = ssim_diff, x = query, fill = value)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_boxplot(notch = TRUE) +
+  geom_label(data = pvals, inherit.aes = FALSE, aes(x = query, label = label), 
+             y = 0.25, fill = "#FFFFFFB3", size = 3.5) +
+  scale_x_discrete(breaks = c("gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14"), 
+                   labels = c("gd7", "Tollrm910", "Toll10B")) +
+  scale_y_continuous(breaks = c(-0.4, -0.2, 0, 0.2), limits = c(-0.3, 0.3)) +
+  scale_fill_manual("", values = c("white", "grey"), breaks = c("None", "DE"), 
+                    labels = c("No DE genes", "Has DE genes")) +
+  scale_x_discrete(breaks = c("gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14"), 
+                   labels = c("gd7", "Tollrm910", "Toll10B")) +
+  scale_y_continuous(breaks = c(-0.4, -0.2, 0, 0.2), limits = c(-0.3, 0.3)) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  labs(title = "", x = "", y = "ssim(control, mutant) -\nssim(control, Hug et al. nc14)")
+p_chess_boxplot_2
+table(tmp$query, tmp$value)
+```
+
+• plotting smoothed ssim differences for all chromosomes 
+
+```{r, fig.width = 6, fig.height = 6}
+mutant_chess_smooth <- mutant_chess %>% 
+  mutate(midpoint = (start + end)/2) %>% 
+  dplyr::select(ref, query, chr, midpoint, SN, ssim, z_ssim, ref_ssim, ssim_diff) %>% 
+  group_by(query, chr) %>% 
+  arrange(midpoint) %>% 
+  mutate(ssim_diff_smooth = zoo::rollapply(ssim_diff, width = 20, FUN = mean, fill = NA))
+  
+mean_sd_df <- mutant_chess_smooth %>% 
+  ungroup() %>% 
+  # group_by(chr) %>% 
+  summarise(mean = mean(ssim_diff_smooth, na.rm=TRUE), 
+            sd = sd(ssim_diff_smooth, na.rm = TRUE),
+            xmax = max(midpoint)) %>% 
+  mutate(ymax=mean+2*sd, ymin = mean-2*sd)
+
+chess_smooth_all_chrs <- mutant_chess_smooth %>% 
+  ggplot(aes(x = midpoint, y = ssim_diff_smooth, colour = query)) +
+  geom_rect(data = filter(mean_sd_df), 
+            aes(ymin = ymin, ymax = ymax, xmin = -Inf, xmax = Inf), 
+            inherit.aes = FALSE, alpha = 0.2) +
+  geom_line() +
+  # geom_point(aes(shape = SN > SN_threshold), alpha = 0.5, show.legend = FALSE) +
+  # scale_shape_manual(values = c("TRUE" = 16, "FALSE" = NA)) +
+  geom_point(data = breakpoints_df, inherit.aes = FALSE, 
+             aes(x = pos), y = -0.2, shape = "*", size = 5) +
+  scale_color_manual(values = colour_scheme) +
+  geom_rug(data = de_genes_positions, inherit.aes = FALSE, aes(x = start), 
+           length = unit(0.1, "npc"), alpha = 0.2) +
+  facet_wrap(~chr, nrow = 6, scales = "free_x", strip.position = "right") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(labels = scales::unit_format(unit = "Mb", scale = 10^-6)) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  labs(x = "", y = "ssim(control, mutant) - ssim(control, Hug et al. nc14)")
+```
+
+
+```{r, fig.width=7, fig.height=7}
+chess_smooth_all_chrs
+pdf("../figures/figure_4_panels/chess_scores_all_chrs.pdf", width = 7, height = 7)
+chess_smooth_all_chrs
+dev.off()
+```
+
+• plotting smoothed ssim differences for individual chromosomes 
+
+```{r}
+chess_smooth_2l <- mutant_chess_smooth %>% 
+  dplyr::filter(chr == "2L") %>% 
+  ggplot(aes(x = midpoint, y = ssim_diff_smooth, colour = query)) +
+  geom_rect(data = mean_sd_df, 
+            aes(ymin = ymin, ymax = ymax, xmin = -Inf, xmax = Inf), 
+            inherit.aes = FALSE, alpha = 0.2) +
+  geom_line() +
+  # geom_point(aes(shape = SN > SN_threshold), alpha = 0.5, show.legend = FALSE) +
+  # scale_shape_manual(values = c("TRUE" = 16, "FALSE" = NA)) +
+  scale_color_manual(values = colour_scheme) +
+  geom_rug(data = filter(de_genes_positions, chr == "2L"), inherit.aes = FALSE, aes(x = start), 
+           length = unit(0.1, "npc"), alpha = 0.2) +
+  facet_wrap(~chr, nrow = 6, scales = "free_x", strip.position = "right") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(labels = scales::unit_format(unit = "Mb", scale = 10^-6)) +
+  scale_y_continuous(limits = c(-0.25, 0.15)) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  labs(x = "", y = "ssim(control, mutant) -\nssim(control, Hug et al. nc14)")
+
+chess_smooth_2r <- mutant_chess_smooth %>% 
+  dplyr::filter(chr == "2R") %>% 
+  ggplot(aes(x = midpoint, y = ssim_diff_smooth, colour = query)) +
+  geom_rect(data = filter(mean_sd_df), 
+            aes(ymin = ymin, ymax = ymax, xmin = -Inf, xmax = Inf), 
+            inherit.aes = FALSE, alpha = 0.2) +
+  geom_line() +
+  # geom_point(aes(shape = SN > SN_threshold), alpha = 0.5, show.legend = FALSE) +
+  # scale_shape_manual(values = c("TRUE" = 16, "FALSE" = NA)) +
+  scale_color_manual(values = colour_scheme) +
+  geom_rug(data = filter(de_genes_positions, chr == "2R"), inherit.aes = FALSE, aes(x = start), 
+           length = unit(0.1, "npc"), alpha = 0.2) +
+  facet_wrap(~chr, nrow = 6, scales = "free_x", strip.position = "right") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(labels = scales::unit_format(unit = "Mb", scale = 10^-6)) +
+  scale_y_continuous(limits = c(-0.25, 0.15)) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  labs(x = "", y = "ssim(control, mutant) -\nssim(control, Hug et al. nc14)")
+
+
+chess_smooth_3l <- mutant_chess_smooth %>% 
+  dplyr::filter(chr == "3L") %>% 
+  ggplot(aes(x = midpoint, y = ssim_diff_smooth, colour = query)) +
+  geom_rect(data = filter(mean_sd_df), 
+            aes(ymin = ymin, ymax = ymax, xmin = -Inf, xmax = Inf), 
+            inherit.aes = FALSE, alpha = 0.2) +
+  geom_line() +
+  geom_point(data = filter(breakpoints_df, chr == "3L"), inherit.aes = FALSE, 
+             aes(x = pos), y = -0.2, shape = "*", size = 5) +
+  scale_color_manual(values = colour_scheme) +
+  geom_rug(data = filter(de_genes_positions, chr == "3L"), inherit.aes = FALSE, aes(x = start), 
+           length = unit(0.1, "npc"), alpha = 0.2) +
+  facet_wrap(~chr, nrow = 6, scales = "free_x", strip.position = "right") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(labels = scales::unit_format(unit = "Mb", scale = 10^-6)) +
+  scale_y_continuous(limits = c(-0.25, 0.15)) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  labs(x = "", y = "ssim(control, mutant) -\nssim(control, Hug et al. nc14)")
+
+
+chess_smooth_3r <- mutant_chess_smooth %>% 
+  dplyr::filter(chr == "3R") %>% 
+  ggplot(aes(x = midpoint, y = ssim_diff_smooth, colour = query)) +
+  geom_rect(data = filter(mean_sd_df), 
+            aes(ymin = ymin, ymax = ymax, xmin = -Inf, xmax = Inf), 
+            inherit.aes = FALSE, alpha = 0.2) +
+  geom_line() +
+  geom_point(data = filter(breakpoints_df, chr == "3R"), inherit.aes = FALSE, 
+             aes(x = pos), y = -0.2, shape = "*", size = 5) +
+  scale_color_manual(values = colour_scheme) +
+  geom_rug(data = filter(de_genes_positions, chr == "3R"), inherit.aes = FALSE, aes(x = start), 
+           length = unit(0.1, "npc"), alpha = 0.2) +
+  facet_wrap(~chr, nrow = 6, scales = "free_x", strip.position = "right") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(labels = scales::unit_format(unit = "Mb", scale = 10^-6)) +
+  scale_y_continuous(limits = c(-0.25, 0.15)) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  labs(x = "", y = "ssim(control, mutant) -\nssim(control, Hug et al. nc14)")
+
+
+chess_smooth_x <- mutant_chess_smooth %>% 
+  dplyr::filter(chr == "X") %>% 
+  ggplot(aes(x = midpoint, y = ssim_diff_smooth, colour = query)) +
+  geom_rect(data = mean_sd_df, 
+            aes(ymin = ymin, ymax = ymax, xmin = -Inf, xmax = Inf), 
+            inherit.aes = FALSE, alpha = 0.2) +
+  geom_line() +
+  # geom_point(aes(shape = SN > SN_threshold), alpha = 0.5, show.legend = FALSE) +
+  # scale_shape_manual(values = c("TRUE" = 16, "FALSE" = NA)) +
+  scale_color_manual(values = colour_scheme) +
+  geom_rug(data = filter(de_genes_positions, chr == "X"), inherit.aes = FALSE, aes(x = start), 
+           length = unit(0.1, "npc"), alpha = 0.2) +
+  facet_wrap(~chr, nrow = 6, scales = "free_x", strip.position = "right") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(labels = scales::unit_format(unit = "Mb", scale = 10^-6)) +
+  scale_y_continuous(limits = c(-0.25, 0.15)) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  labs(x = "", y = "ssim(control, mutant) -\nssim(control, Hug et al. nc14)")
+```
+
+
+```{r fig.width=7, fig.height=2}
+chess_smooth_2l
+chess_smooth_2r
+chess_smooth_3l
+chess_smooth_3r
+chess_smooth_x
+```
+
+* plotting smoothed ssim diffrences in highlighted regions of interest on diff chromosomes
+
+```{r fig.width = 4, fig.height=2}
+chess_smooth_zoom_2l <- chess_smooth_2l +
+  coord_cartesian(xlim = c(5*10^6, 7*10^6)) +
+  theme(legend.position = "none")
+
+chess_smooth_zoom_2r <- chess_smooth_2r +
+  coord_cartesian(xlim = c(20*10^6, 22*10^6)) +
+  theme(legend.position = "none")
+
+chess_smooth_zoom_3l <- chess_smooth_3l +
+  coord_cartesian(xlim = c(6*10^6, 8*10^6)) +
+  theme(legend.position = "none")
+
+chess_smooth_zoom_3r <- chess_smooth_3r +
+  coord_cartesian(xlim = c(19.5*10^6, 21.5*10^6)) +
+  theme(legend.position = "none")
+
+chess_smooth_zoom_3r2 <- chess_smooth_3r +
+  coord_cartesian(xlim = c(21.5*10^6, 23.5*10^6)) +
+  theme(legend.position = "none")
+
+chess_smooth_zoom_x <- chess_smooth_x +
+  coord_cartesian(xlim = c(9*10^6, 11*10^6)) +
+  theme(legend.position = "none")
+```
+
+* plotting composite figures for specific chromosomes
+
+```{r fig.width=7, fig.height=5}
+# cowplot::plot_grid(chess_smooth_2l,
+#                    cowplot::plot_grid(chess_smooth_zoom_2l, chess_boxplot, 
+#                                       rel_widths = c(4, 3), align = "h", axis = "tb"),
+#                    nrow = 2)
+# cowplot::plot_grid(chess_smooth_x,
+#                    cowplot::plot_grid(chess_smooth_zoom_x, chess_boxplot, 
+#                                       rel_widths = c(4, 3), align = "h", axis = "tb"),
+#                    nrow = 2)
+
+pdf("../figures/figure_4_panels/chess_scores_2l.pdf", width = 7, height = 5)
+cowplot::plot_grid(chess_smooth_2l,
+                   cowplot::plot_grid(chess_smooth_zoom_2l, p_chess_boxplot_2,
+                                      rel_widths = c(4, 3), align = "h", axis = "tb"),
+                   nrow = 2)
+dev.off()
+
+pdf("../figures/figure_4_panels/chess_scores_2r.pdf", width = 7, height = 5)
+cowplot::plot_grid(chess_smooth_2r,
+                   cowplot::plot_grid(chess_smooth_zoom_2r, p_chess_boxplot_2,
+                                      rel_widths = c(4, 3), align = "h", axis = "tb"),
+                   nrow = 2)
+dev.off()
+
+pdf("../figures/figure_4_panels/chess_scores_3l.pdf", width = 7, height = 5)
+cowplot::plot_grid(chess_smooth_3l,
+                   cowplot::plot_grid(chess_smooth_zoom_3l, p_chess_boxplot_2,
+                                      rel_widths = c(4, 3), align = "h", axis = "tb"),
+                   nrow = 2)
+dev.off()
+
+pdf("../figures/figure_4_panels/chess_scores_3r.pdf", width = 7, height = 5)
+cowplot::plot_grid(chess_smooth_3r,
+                   cowplot::plot_grid(chess_smooth_zoom_3r, p_chess_boxplot_2,
+                                      rel_widths = c(4, 3), align = "h", axis = "tb"),
+                   nrow = 2)
+dev.off()
+
+pdf("../figures/figure_4_panels/chess_scores_3r2.pdf", width = 7, height = 5)
+cowplot::plot_grid(chess_smooth_3r,
+                   cowplot::plot_grid(chess_smooth_zoom_3r2, p_chess_boxplot_2,
+                                      rel_widths = c(4, 3), align = "h", axis = "tb"),
+                   nrow = 2)
+dev.off()
+
+pdf("../figures/figure_4_panels/chess_scores_x.pdf", width = 7, height = 5)
+cowplot::plot_grid(chess_smooth_x,
+                   cowplot::plot_grid(chess_smooth_zoom_x, p_chess_boxplot_2,
+                                      rel_widths = c(4, 3), align = "h", axis = "tb"),
+                   nrow = 2)
+dev.off()
+
+```
+
+# Analysis - stg10
+
+```{r}
+chess_comparisons_stg10 <- filter(chess_comparisons_all, stage == "stg10")
+
+```
+
+* plot z-score across all chromosomes as an overview
+
+```{r fig.width = 6, fig.height = 6}
+chess_comparisons_stg10_smooth <- chess_comparisons_stg10 %>% 
+  mutate(midpoint = (start + end)/2) %>% 
+  dplyr::select(ref, query, chr, midpoint, SN, ssim, z_ssim) %>% 
+  group_by(query, chr) %>% 
+  arrange(midpoint) %>% 
+  mutate(z_ssim_smooth = zoo::rollapply(z_ssim, width = 20, FUN = mean, fill = NA))
+
+chess_smooth_all_chrs <- chess_comparisons_stg10_smooth %>% 
+  ggplot(aes(x = midpoint, y = z_ssim_smooth, colour = query)) +
+  annotate("rect", ymin = -2, ymax = 2, xmin = -Inf, xmax = Inf, fill = "grey", alpha = 0.6) + 
+  geom_line() +
+  geom_point(data = breakpoints_df, inherit.aes = FALSE, 
+             aes(x = pos), y = -2.5, shape = "*", size = 5) +
+  scale_color_manual(values = colour_scheme2) +
+  geom_rug(data = de_genes_positions, inherit.aes = FALSE, aes(x = start), 
+           length = unit(0.1, "npc"), alpha = 0.2) +
+  facet_wrap(~chr, nrow = 6, scales = "free_x", strip.position = "right") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(labels = scales::unit_format(unit = "Mb", scale = 10^-6)) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  labs(x = "", y = "ssim Z-score")
+
+chess_smooth_all_chrs
+```
+
+
+```{r}
+ref_chess <- chess_comparisons_stg10 %>% 
+  dplyr::filter(query == "control-stg10") %>% 
+  rename(ssim = "ref_ssim") %>% 
+  dplyr::select(chr, start, end, ref_ssim)
+
+mutant_chess <- chess_comparisons_stg10 %>% 
+  dplyr::filter(query %in% c("gd7-stg10", "Tollrm910-stg10", "Toll10B-stg10"))
+
+mutant_chess <- left_join(mutant_chess, ref_chess) %>% 
+  mutate(ssim_diff = ssim - ref_ssim)
+
+```
+
+* plot smoothed differences for all chromosomes as an overview
+
+```{r, fig.width = 6, fig.height = 6}
+mutant_chess_stg10_smooth <- mutant_chess  %>% 
+  mutate(midpoint = (start + end)/2) %>% 
+  dplyr::select(ref, query, chr, midpoint, SN, ssim, z_ssim, ref_ssim, ssim_diff) %>% 
+  group_by(query, chr) %>% 
+  arrange(midpoint) %>% 
+  mutate(ssim_diff_smooth = zoo::rollapply(ssim_diff, width = 20, FUN = mean, fill = NA))
+
+mean_sd_df <- mutant_chess_stg10_smooth %>% 
+  ungroup() %>% 
+  # group_by(chr) %>% 
+  summarise(mean = mean(ssim_diff_smooth, na.rm=TRUE), 
+            sd = sd(ssim_diff_smooth, na.rm = TRUE),
+            xmax = max(midpoint)) %>% 
+  mutate(ymax=mean+2*sd, ymin = mean-2*sd)
+
+mutant_chess_stg10_smooth %>% 
+  ggplot(aes(x = midpoint, y = ssim_diff_smooth, colour = query)) +
+  geom_rect(data = filter(mean_sd_df), 
+            aes(ymin = ymin, ymax = ymax, xmin = -Inf, xmax = Inf), 
+            inherit.aes = FALSE, alpha = 0.2) +
+  geom_line() +
+  geom_point(data = breakpoints_df, inherit.aes = FALSE, 
+             aes(x = pos), y = -0.2, shape = "*", size = 5) +
+  scale_color_manual(values = colour_scheme) +
+  facet_wrap(~chr, nrow = 6, scales = "free_x", strip.position = "right") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(labels = scales::unit_format(unit = "Mb", scale = 10^-6)) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  labs(x = "", y = "ssim(control stg10, mutant stg10) - ssim(control stg10, control stg5)")
+```
+
+* plotting 1-ssim across all chromosomes
+
+```{r, fig.width=7, fig.height=7}
+chess_comparisons_stg10_smooth <- chess_comparisons_stg10  %>% 
+  mutate(midpoint = (start + end)/2) %>% 
+  dplyr::select(ref, query, chr, midpoint, SN, ssim, z_ssim) %>% 
+  group_by(query, chr) %>% 
+  arrange(midpoint) %>% 
+  mutate(ssim_smooth = zoo::rollapply(ssim, width = 20, FUN = mean, fill = NA))
+  
+
+stg10_all_chrs <- chess_comparisons_stg10_smooth %>% 
+  ggplot(aes(x = midpoint, y = 1 - ssim_smooth, colour = query)) +
+  geom_line() +
+  # geom_point(aes(shape = SN > SN_threshold), alpha = 0.5, show.legend = FALSE) +
+  # scale_shape_manual(values = c("TRUE" = 16, "FALSE" = NA)) +
+  geom_point(data = breakpoints_df, inherit.aes = FALSE, 
+             aes(x = pos), y = 0.85, shape = "*", size = 5) +
+  scale_color_manual(values = colour_scheme, 
+                     breaks = c("control-stg10", "gd7-stg10", "Tollrm910-stg10", "Toll10B-stg10"), 
+                     labels = c("control-nc14", "gd7", "Tollrm910", "Toll10B")) +
+  facet_wrap(~chr, nrow = 6, scales = "free_x", strip.position = "right") +
+  theme_bw(base_size = 12) +
+  scale_x_continuous(labels = scales::unit_format(unit = "Mb", scale = 10^-6)) +
+  scale_y_continuous(limits = c(0.1, 0.9)) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  labs(x = "", y = "1 - ssim")
+stg10_all_chrs
+
+```
+
+
+
+# Session info
+
+This report was generated at `r format(Sys.time(), "%X, %a %b %d %Y")`. 
+
+```{r}
+sessionInfo()
+```

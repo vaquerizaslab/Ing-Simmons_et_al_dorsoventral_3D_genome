@@ -1,0 +1,1723 @@
+---
+title: "Dorsal-ventral patterning enhancers and enhancer domains"
+author: "Liz Ing-Simmons"
+date: "09/09/2019"
+output: 
+  html_document:
+    toc: true
+    toc_float: false
+    code_folding: hide
+---
+
+```{r global_options, echo=FALSE}
+knitr::opts_chunk$set(fig.width=6, fig.height=4, dpi = 300, out.width = "60%", dev = c("png", "pdf"),
+             warning=FALSE, message=FALSE, error = FALSE)
+pdf.options(useDingbats = FALSE)
+```
+
+```{r load_packages, cache = FALSE}
+library("readxl")
+library("ensembldb")
+library("GenomicRanges")
+library("rtracklayer")
+library("dplyr")
+library("ggplot2")
+library("heatmaps")
+library("UpSetR")
+library("BSgenome.Dmelanogaster.UCSC.dm6")
+Dmel <- Dmelanogaster
+seqlevelsStyle(Dmel) <- "Ensembl"
+
+colour_scheme <- c(gd7 = "#648FFF", nc14 = "#785EF0", Tollrm910 ="#DC267F", 
+                   "3-4h" = "#FE6100", Toll10B = "#FFB000", "mitotic" = "black")
+
+basedir <- here::here()
+```
+
+```{r functions}
+drop_windows <- function(windows, genome){
+  drop_idx <- end(windows) > seqlengths(genome)[as.character(seqnames(windows))] | start(windows) <= 0
+  message("Dropping ", sum(drop_idx), " ranges")
+  return(windows[!drop_idx])
+}
+
+make_heatmap <- function(cov, windows, label= ""){
+  #windows <- drop_windows(resize(windows, width = width, fix = "center"), Dmel)
+  width <- unique(width(windows))
+  if (length(width) > 1) {
+    stop("windows should all be the same size!")
+    }
+  coords <- c(-(width/2), width/2) # each side is half the total width
+  hm <- CoverageHeatmap(windows, cov, coords = coords, label = label)
+  scale_val <- max(abs(quantile(image(hm), c(0.01, 0.99), na.rm = TRUE)))
+  heatmaps::scale(hm) <- c(0, scale_val)
+  return(hm)
+}
+```
+
+## Data for comparisons
+
+### Genes
+
+```{r}
+dm3_to_dm6_chain <- import.chain(file.path(basedir, "external_data/dm3ToDm6.over.chain"))
+dm6_blacklist_regions <- import.bed(file.path(basedir, "external_data/blacklist/Blacklist/lists/dm6-blacklist.v2.bed"))
+chrs_to_use <- c("2L", "2R", "3L", "3R", "4", "X")
+```
+
+```{r import_genes, cache=TRUE}
+gene_ids_key <- rtracklayer::import.gff(file.path(basedir, "external_data/flybase/dmel-all-r6.30.gtf.gz")) %>% 
+  as.data.frame() %>%
+  dplyr::filter(type == "gene") %>%
+  dplyr::select(gene_id, gene_symbol)
+
+txdb <- makeTxDbFromGFF(file.path(basedir, "external_data/flybase/dmel-all-r6.30.gtf.gz"))
+transcripts_gr <- transcripts(txdb, columns = c("TXNAME", "GENEID"))
+mcols(transcripts_gr)$GENEID <- unlist(mcols(transcripts_gr)$GENEID)
+
+mcols(transcripts_gr) <- left_join(as.data.frame(mcols(transcripts_gr)), 
+                                   gene_ids_key, by = c("GENEID" = "gene_id"))
+
+transcripts_gr <- transcripts_gr[seqnames(transcripts_gr) %in% chrs_to_use]
+
+# potential transcripts to exclude
+# sapply(transcripts_gr$gene_symbol[grepl(":", transcripts_gr$gene_symbol)], function(str){
+#   strsplit(str, ":", fixed = TRUE)[[1]][1]
+# }) %>%  table()
+
+tx_types_to_exclude <- c("tRNA:", "rRNA:", "rRNA-Psi:", "asRNA:", "snoRNA:", "scaRNA:", "snRNA:")
+
+transcripts_gr <- transcripts_gr[!grepl(pattern = paste(tx_types_to_exclude, collapse = "|"), 
+                                        transcripts_gr$gene_symbol)]
+
+promoters_gr <- promoters(transcripts_gr, upstream = 1, downstream = 0)
+```
+
+#### Housekeeping genes
+
+```{r}
+hk_gene_ids <- read.table(file.path(basedir, "../external_data/flybase/low_expression_all_stages_all_tissues.txt"), 
+                          stringsAsFactors = FALSE) %>% pull(V1)
+```
+
+### Koenecke et al. enhancers
+
+## Koenecke et al enhancers
+```{r}
+koenecke_distal_enhancers_dm3 <- readxl::read_excel(
+  file.path(basedir, "../external_data/koenecke_2016_2017/enhancers/",
+            "distal_enhancers_dm3_13059_2016_1057_MOESM4_ESM.xlsx"), sheet = 2)
+
+koenecke_distal_enhancers_dm6_list <- koenecke_distal_enhancers_dm3 %>% 
+  as.data.frame() %>% 
+  makeGRangesFromDataFrame(keep.extra.columns = TRUE) %>%
+  liftOver(dm3_to_dm6_chain)
+
+koenecke_distal_enhancers_dm6 <- do.call("c", unname(koenecke_distal_enhancers_dm6_list[lengths(koenecke_distal_enhancers_dm6_list) == 1]))
+seqlevelsStyle(koenecke_distal_enhancers_dm6) <- "Ensembl"
+koenecke_enhancers_list <- split(koenecke_distal_enhancers_dm6, 
+                                 koenecke_distal_enhancers_dm6$differential_k27ac)
+names(koenecke_enhancers_list) <- gsub("Higher in ", "Koenecke et al. ", names(koenecke_enhancers_list))
+
+## Literature enhancers from Koenecke et al
+literature_enhancers_dm3 <- readxl::read_excel(file.path(basedir,
+  "../external_data/koenecke_2016_2017/enhancers/literature_enhancers_dm3_13059_2016_1057_MOESM2_ESM.xlsx"), sheet = 1)
+literature_enhancers_dm6_list <- literature_enhancers_dm3 %>% 
+  as.data.frame() %>% 
+  makeGRangesFromDataFrame(keep.extra.columns = TRUE) %>%
+  liftOver(dm3_to_dm6_chain)
+
+literature_enhancers_dm6 <- do.call("c", unname(literature_enhancers_dm6_list[lengths(literature_enhancers_dm6_list) == 1]))
+seqlevelsStyle(literature_enhancers_dm6) <- "Ensembl"
+literature_enhancers_list <- split(literature_enhancers_dm6, literature_enhancers_dm6$enhancer_type)
+names(literature_enhancers_list) <- paste("Literature", names(literature_enhancers_list))
+```
+
+### TADs
+
+#### TADs from 3-4h data
+
+I've identified robust TAD boundaries across different parameter combinations. 
+
+```{r read_tad_boundaries}
+##N.B. dm6!!
+boundaries <- import.bed(file.path(basedir, "data/boundaries/3-4h_final_boundaries.bed"))
+
+boundary_tads <- import.bed(file.path(basedir, "data/boundaries/3-4h_paired_boundary_domains.bed"))
+
+as.data.frame(boundary_tads) %>%
+  ggplot(aes(x = width)) +
+  geom_histogram(binwidth = 4000, colour = "white") +
+  coord_cartesian(xlim = c(0, 300000))
+
+```
+
+### GRBs
+
+Citation: Harmston, N., Ing-Simmons, E., Tan, G., Perry, M., Merkenschlager, M., & Lenhard, B. (2016). Topologically associated domains are ancient features that coincide with Metazoan clusters of extreme noncoding conservation. Nature Communications volume 8, Article number: 441 (2017) https://www.nature.com/articles/s41467-017-00524-5
+
+GRBs (genomic regulatory blocks) are clusters of highly conserved non-coding sequence elements. These clusters are frequently found around developmentally regulated genes, particularly transcription factors, and component conserved non-coding elements (CNEs) have been found to act as enhancers for such developmentally regulated genes. GRBs tend to conincide with TADs, suggesting both features reflect underlying regulatory domains. 
+
+```{r read_grbs}
+grbs_dm3 <- import.bed(file.path(basedir, "../external_data/harmston_2017/dm3_droMoj3_96_50/dm3_droMoj3_96_50.final.bed"))
+grbs_dm6 <- liftOver(grbs_dm3, dm3_to_dm6_chain)
+
+grbs_dm6 <- do.call("c", grbs_dm6[lengths(grbs_dm6)==1])
+
+grbs <- grbs_dm6
+seqlevelsStyle(grbs) <- "Ensembl"
+
+grbs$tad_overlap <- countOverlaps(grbs, boundary_tads)
+grbs$tad_overlap[grbs %within% boundary_tads] <- "within"
+
+as.data.frame(grbs) %>%
+  ggplot(aes(x = width)) +
+  geom_histogram(binwidth = 20000, colour = "white")
+
+levels <- c("within", 0:max(as.numeric(grbs$tad_overlap), na.rm = TRUE))
+
+as.data.frame(grbs) %>%
+  mutate(tad_overlap = factor(tad_overlap, levels = levels)) %>% 
+  ggplot(aes(x = tad_overlap)) +
+  geom_bar() +
+  scale_x_discrete(breaks = levels, labels = levels, drop = FALSE) +
+  labs(x = "Number of overlapping TADs", y = "Number of GRBs")
+
+# export.bed(grbs, con = "grbs_dm6.bed")
+```
+
+The median size of GRBs in this dataset is `r round(median(width(grbs))/1000)` kb. This is larger than the average TAD size in Drosophila, and may reflect that developmentally regulated genes require large domains with many regulatory elements in order to specify complex expression patterns. Nevertheless, `r sum(grbs$tad_overlap == "within")` GRBs fall within a single TAD, and `r signif(sum(grbs$tad_overlap %in% c("within", 1, 2))/length(grbs)*100, 3)` % fall within a single TAD, or overlap 1 or 2 TADs.
+
+
+### Blacklist regions
+
+"Blacklist" regions that may be problematic in sequencing experiments were obtained from [ENCODE](https://github.com/Boyle-Lab/Blacklist).
+
+```{r}
+seqlevelsStyle(dm6_blacklist_regions) <- "Ensembl"
+
+as.data.frame(dm6_blacklist_regions) %>% 
+  group_by(seqnames) %>% 
+  summarise(total_bp = sum(width))
+```
+
+There are `r length(dm6_blacklist_regions)` with a median width of `r median(width(dm6_blacklist_regions))` bp and a mean width of `r mean(width(dm6_blacklist_regions))` bp. 
+
+### Breakpoints from Ghavi-Helm et al. 2019
+
+```{r}
+TM3_breakpoints <- import.bed(file.path(basedir, "external_data/ghavi-helm_2019/TM3_breakpoints.bed"))
+
+```
+
+## Enhancers from differential H3K27ac 
+
+I've used H3K27ac ChIP-seq data from Koenecke et al. 2016 in Toll10B and gd7, along with Tollrm9/10 H3K27ac ChIP-seq data from Roshan, to identify putative enhancers. I called pairwise differential H3K27ac peaks using `csaw` and took peaks that were enriched in each genotype vs both of the others to get a stringent set of putative enhancers. I also removed regions within 100 bp of a TSS.
+
+```{r read_enhancers}
+gd7_enhancers <- import.bed(file.path(basedir, "data/supplementary_tables/gd7_candidate_enhancers.bed"))
+Tollrm910_enhancers <- import.bed(file.path(basedir, "data/supplementary_tables/Tollrm910_candidate_enhancers.bed"))
+Toll10B_enhancers <- import.bed(file.path(basedir, "data/supplementary_tables/Toll10B_candidate_enhancers.bed"))
+
+gd7_enhancers$class <- "gd7"
+Tollrm910_enhancers$class <- "Tollrm910"
+Toll10B_enhancers$class <- "Toll10B"
+all_enhancers <- c(gd7_enhancers, Tollrm910_enhancers, Toll10B_enhancers)
+```
+
+There are `r length(gd7_enhancers)` putative dorsal ectoderm (gd7) enhancers, `r length(Tollrm910_enhancers)` putative neurectoderm (Tollrm910) enhancers, and `r length(Toll10B_enhancers)` putative mesoderm (Toll10B) enhancers.
+
+### H3K27ac signal at enhancers
+
+```{r make_windows, cache=TRUE}
+gd7_windows <- drop_windows(resize(gd7_enhancers, fix = "center", width = 10000), Dmel)
+gd7_windows$class <- "gd7"
+Tollrm910_windows <- drop_windows(resize(Tollrm910_enhancers, fix = "center", width = 10000), Dmel)
+Tollrm910_windows$class <- "Tollrm910"
+Toll10B_windows <- drop_windows(resize(Toll10B_enhancers, fix = "center", width = 10000), Dmel)
+Toll10B_windows$class <- "Toll10B"
+
+windows <- c(gd7_windows, Tollrm910_windows, Toll10B_windows)
+```
+
+```{r read_chipseq, cache=TRUE}
+chipseq_bw <- list.files("../external_data/koenecke_2016_2017/chipseq_aligned/",
+                         pattern ="_sorted_filtered_merged_canonical_chrs.bw$", full.names = TRUE) %>% 
+  setNames(gsub("_sorted_filtered_merged_canonical_chrs.bw", "", basename(.)))
+
+chipseq_bw2 <- list.files("../external_data/extra_chip-seq/chipseq_aligned/",
+                          pattern ="_sorted_filtered_merged_canonical_chrs.bw$", full.names = TRUE) %>% 
+   setNames(gsub("_sorted_filtered_merged_canonical_chrs.bw", "", basename(.)))
+
+chipseq_bw <- c(chipseq_bw, chipseq_bw2)
+
+chipseq_df <- tibble::tibble(file = basename(chipseq_bw), name = names(chipseq_bw)) %>% 
+  tidyr::separate(name, into = c("factor", "genotype"), sep = "_", remove = FALSE)
+
+chipseq_df %>% 
+  dplyr::select(factor, genotype) %>% 
+  knitr::kable()
+
+files_to_use <- chipseq_df %>% 
+  dplyr::filter(factor %in% c("H3K27ac", "H3K27me3")) %>% 
+  arrange(factor) %>% 
+  pull(name)
+names(chipseq_bw)
+
+chipseq_cov <- lapply(chipseq_bw[files_to_use], function(f) {
+  coverage(import.bw(f), weight = "score")})
+
+```
+
+```{r make_heatmaps, cache=TRUE, dependson=c("make_windows", "read_chipseq")}
+hm_list <- lapply(names(chipseq_cov), function(n){
+    make_heatmap(chipseq_cov[[n]], windows = windows, label = "")
+    }) %>% setNames(names(chipseq_cov))
+```
+
+
+```{r, cache=TRUE, dependson="make_heatmaps"}
+summarise_heatmap <- function(hm){
+  df <- as.data.frame(image(hm)) %>%
+    dplyr::mutate(group = windows$class) %>%
+    tibble::rownames_to_column(var = "region") %>% 
+    tidyr::pivot_longer(starts_with("V"), names_to = "xpos", names_prefix = "V") %>%
+    mutate(xpos = as.numeric(xpos), 
+           value = case_when(is.infinite(value) ~ 0, TRUE ~ value)
+           ) %>%
+    group_by(xpos, group) %>% 
+    summarise(mean = mean(value, na.rm = TRUE), sd = sd(value, na.rm = TRUE))
+  return(df)
+}
+
+all_hm_summary_df <- lapply(hm_list, summarise_heatmap) %>% 
+  # setNames(setNames(names(chipseq_cov)[2:7])) %>% 
+  bind_rows(.id = "chip") %>% 
+  tidyr::separate(chip, into = c("factor", "genotype"), sep = "_")
+```
+
+
+```{r, fig.height=4, fig.width=4, out.width="100%", cache=TRUE}
+enhancer_meta_plot <- all_hm_summary_df %>%
+  mutate(genotype = case_when(genotype == "tl10b" ~ "Toll10B",
+                              TRUE ~ genotype)) %>% 
+  mutate(genotype = factor(genotype, levels = c("gd7", "Tollrm910", "Toll10B")),
+         group = factor(group, levels = c("gd7", "Tollrm910", "Toll10B"))) %>% 
+  ggplot(aes(x = xpos, y = mean, ymin = mean - sd, 
+                                   ymax = mean + sd, colour = genotype, fill = genotype)) +
+  geom_ribbon(alpha = 0.2, colour = NA) +
+  geom_line() +
+  facet_grid(group~factor, scales = "free_x") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank()) +
+  # theme(panel.spacing.x = unit(2, "lines")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_colour_manual(values = colour_scheme) +
+  scale_fill_manual(values = colour_scheme) +
+  scale_x_continuous("", breaks = c(0, 5000, 10000), labels = c("-5 kb", "Enh", "+5 kb")) +
+  labs(colour = "Signal in:", fill = "Signal in:", y = "ChIP-seq signal (CPM)")
+enhancer_meta_plot
+
+# 
+# pdf("../figures/figure_1_panels/csaw_enhancer_histone_mods_meta.pdf",
+#     width = 4, height = 4)
+# enhancer_meta_plot
+# dev.off()
+
+```
+
+
+### UpSet plots
+
+```{r}
+enhancers_list <- list("gd7 - this study" = gd7_enhancers, 
+                       "Tollrm910 - this study" = Tollrm910_enhancers, 
+                       "Toll10B - this study" = Toll10B_enhancers,
+                       "gd7 - Koenecke et al." = koenecke_enhancers_list$`Koenecke et al. gd7`,
+                       "Toll10B - Koenecke et al." = koenecke_enhancers_list$`Koenecke et al. Toll10b`,
+                       "Dorsal ectoderm - literature" = literature_enhancers_list$`Literature DEE`,
+                       "Mesoderm - literature" = literature_enhancers_list$`Literature ME`)
+
+
+all_regions <- do.call("c", unname(enhancers_list))
+# length(all_regions)
+# summary(width(all_regions))
+# length(reduce(all_regions))
+# summary(width(reduce(all_regions)))
+all_regions <- reduce(all_regions)
+
+
+ol_df <- sapply(enhancers_list, function(gr){
+  as.integer(countOverlaps(all_regions, gr) > 0)
+}) %>% 
+  as.data.frame() %>% 
+  mutate(id = as.character(all_regions))
+
+```
+
+
+```{r, fig.width=5, fig.height=5}
+set_metadata <- data.frame(set = names(enhancers_list),
+                           tissue = c("dorsal ectoderm", "neuroectoderm","mesoderm", 
+                                      "dorsal ectoderm", "mesoderm", 
+                                      "dorsal ectoderm", "mesoderm")) %>% 
+  mutate(tissue = factor(tissue, levels = c("dorsal ectoderm", "neuroectoderm","mesoderm")))
+
+upset(ol_df, 
+      set.metadata = list(data = set_metadata, 
+                          plots = list(list(type = "matrix_rows", 
+                                            column = "tissue", 
+                                            colors = c("mesoderm" = "#FFB000", 
+                                                       "neuroectoderm" = "#DC267F", 
+                                                       "dorsal ectoderm" = "#648FFF"),
+                                            alpha = 0.2))),
+      sets = rev(names(enhancers_list)[order(set_metadata$tissue)]), 
+      keep.order = TRUE, mb.ratio = c(0.7, 0.3))
+
+pdf(file.path(basedir, "figures/figure_1_panels/csaw_upset_plot.pdf"), width = 5, height = 5)
+upset(ol_df, 
+      set.metadata = list(data = set_metadata, 
+                          plots = list(list(type = "matrix_rows", 
+                                            column = "tissue", 
+                                            colors = c("mesoderm" = "#FFB000", 
+                                                       "neuroectoderm" = "#DC267F", 
+                                                       "dorsal ectoderm" = "#648FFF"),
+                                            alpha = 0.2))),
+      sets = rev(names(enhancers_list)[order(set_metadata$tissue)]), 
+      keep.order = TRUE, mb.ratio = c(0.7, 0.3))
+dev.off()
+```
+
+
+### Comparisons to Kvon et al. 2014 enhancers
+
+Kvon et al. 2014 tested many genomic tiles for enhancer activity during embryogenesis and annotated their expression patterns. I'll check how many of my enhancers overlap their tiles, and what expression patterns these drive.
+
+```{r}
+tiles_df <- read.csv(file.path(basedir, "../external_data/kvon_2014/tiles.csv"), 
+                     header = TRUE, stringsAsFactors = FALSE)
+```
+
+There are `r nrow(tiles_df)` of which `r sum(tiles_df$Positive)` are active in at least one timepoint.
+
+I'll liftover positive tiles to dm6 from dm3. One region is removed because the lift over splits it into four regions on two different chromosomes.
+
+```{r}
+tiles_df <- dplyr::filter(tiles_df, Positive > 0)
+tiles_gr <- makeGRangesFromDataFrame(tiles_df, keep.extra.columns = TRUE,
+                                     seqnames.field = "Chrosome")
+tiles_dm6 <- liftOver(tiles_gr, dm3_to_dm6_chain)
+# tiles_dm6[lengths(tiles_dm6) > 1]
+# one region split into four 
+
+tiles_dm6 <- do.call("c", tiles_dm6[lengths(tiles_dm6)==1])
+seqlevelsStyle(tiles_dm6) <- "Ensembl"
+
+all_enhancers <- c(gd7_enhancers, Tollrm910_enhancers, Toll10B_enhancers)
+all_enhancers$class <- c(rep("gd7", length(gd7_enhancers)),
+                   rep("Tollrm910", length(Tollrm910_enhancers)),
+                   rep("Toll10B", length(Toll10B_enhancers)))
+
+ol <- findOverlaps(all_enhancers, tiles_dm6)
+```
+
+`r length(unique(queryHits(ol)))` of my enhancers overlap `r length(unique(subjectHits(ol)))` tiles. 
+
+```{r}
+tiles_enh_ol_df <- tiles_dm6[subjectHits(ol)] %>% 
+  as.data.frame() %>% 
+  mutate(enhancer_class = all_enhancers$class[queryHits(ol)],
+         enhancer_id = as.character(all_enhancers[queryHits(ol)]))
+
+tiles_enh_ol_df %>% 
+  group_by(enhancer_class) %>% 
+  tally()
+
+tiles_enh_ol_df_long <- tiles_enh_ol_df %>% 
+  tidyr::pivot_longer(stg4_6:stg15_16, names_to = "stage", values_to = "active_in") %>% 
+  dplyr::filter(!is.na(active_in)) %>%  
+  tidyr::separate_rows(active_in, sep = "\\|" ) %>% 
+  tidyr::separate(active_in, into = c("active_in", "strength"), sep = ";") %>% 
+  dplyr::mutate(enhancer_class = factor(enhancer_class, ordered = TRUE,
+                                        levels = c("gd7", "Tollrm910", "Toll10B")))
+
+tiles_enh_ol_df_long %>% 
+  dplyr::select(stage, active_in) %>% 
+  unique() %>% 
+  group_by(stage) %>% 
+  tally()
+
+## stage4-6
+
+top2_df <- tiles_enh_ol_df_long %>% 
+  dplyr::filter(stage %in% c("stg4_6")) %>% 
+  mutate(activity_class = case_when(
+    grepl("A-P", active_in) ~ "A-P",
+    TRUE ~ active_in
+  )) %>%
+  mutate(activity_class = gsub("_AISN|_AISN_broad|_AISN_subset", "", activity_class)) %>% 
+  group_by(stage, enhancer_class, activity_class) %>% 
+  tally() %>% 
+  group_by(enhancer_class) %>% 
+  arrange(desc(activity_class)) %>% 
+  mutate(ypos = cumsum(n) - 0.5*n) %>% 
+  top_n(2, wt = n) %>% 
+  mutate(label = gsub("_", "\n", activity_class))
+
+
+p1 <- tiles_enh_ol_df_long %>% 
+  dplyr::filter(stage %in% c("stg4_6")) %>% 
+  mutate(activity_class = case_when(
+    grepl("A-P", active_in) ~ "A-P",
+    TRUE ~ active_in
+  )) %>%
+  mutate(activity_class = gsub("_AISN|_AISN_broad|_AISN_subset", "", activity_class)) %>% 
+  ggplot(aes(x = enhancer_class, fill = activity_class)) +
+  geom_bar() +
+  geom_text(data = top2_df, aes(label = label, y = ypos), colour = "black", size = 3.527778, lineheight = 0.8) +
+  # scale_fill_viridis_d() +
+  paletteer::scale_fill_paletteer_d("ggthemes::Tableau_20") +
+  theme_bw(base_size = 12) +
+  labs(title = "Enhancer activity at stage 4-6", y = "Number of enhancers", fill = "", x = "") +
+  guides(fill=guide_legend(ncol=2))
+
+## stage 7-8
+
+top2_df <- tiles_enh_ol_df_long %>% 
+  dplyr::filter(stage %in% c("stg7_8")) %>% 
+  mutate(activity_class = case_when(
+    grepl("A-P", active_in) ~ "A-P",
+    TRUE ~ active_in
+  )) %>%
+  mutate(activity_class = gsub("_anlage|_anlage_broad|_anlage_subset", "", activity_class)) %>% 
+  group_by(stage, enhancer_class, activity_class) %>% 
+  tally() %>% 
+  group_by(enhancer_class) %>% 
+  arrange(desc(activity_class)) %>% 
+  mutate(ypos = cumsum(n) - 0.5*n) %>% 
+  top_n(2, wt = n) %>% 
+  mutate(label = gsub("_", "\n", activity_class))
+
+
+p2 <- tiles_enh_ol_df_long %>% 
+  dplyr::filter(stage %in% c("stg7_8")) %>% 
+  mutate(activity_class = case_when(
+    grepl("A-P", active_in) ~ "A-P",
+    TRUE ~ active_in
+  )) %>%
+  mutate(activity_class = gsub("_anlage|_anlage_broad|_anlage_subset", "", activity_class)) %>% 
+  ggplot(aes(x = enhancer_class, fill = activity_class)) +
+  geom_bar() +
+  geom_text(data = top2_df, aes(label = label, y = ypos), colour = "black", size = 3.527778, lineheight = 0.8) +
+  # scale_fill_viridis_d() +
+  paletteer::scale_fill_paletteer_d("ggthemes::Tableau_20") +
+  theme_bw(base_size = 12) +
+  labs(title = "Enhancer activity at stage 7-8", y = "Number of enhancers", fill = "", x = "") +
+  guides(fill=guide_legend(ncol=2))
+
+```
+
+
+```{r fig.width=7, fig.height=7}
+cowplot::plot_grid(p1, p2, nrow = 2, align = "v")
+
+pdf(file.path(basedir, "figures/figure_1_panels/kvon_tile_activity.pdf"), width = 7, height = 7)
+cowplot::plot_grid(p1, p2, nrow = 2, align = "v")
+dev.off()
+```
+
+```{r}
+tiles_enh_ol_df_long_simple <- tiles_enh_ol_df_long %>% 
+   dplyr::filter(stage %in% c("stg4_6", "stg7_8")) %>% 
+  mutate(activity_class = case_when(
+    grepl("A-P", active_in) ~ "A-P",
+    TRUE ~ active_in
+  )) %>%
+  mutate(activity_class = gsub("_AISN|_AISN_broad|_AISN_subset", "", activity_class)) %>% 
+  mutate(activity_class = gsub("_anlage|_anlage_broad|_anlage_subset", "", activity_class))
+
+unique(tiles_enh_ol_df_long_simple$activity_class)
+
+gd7_matching <- tiles_enh_ol_df_long_simple %>% 
+  dplyr::filter(enhancer_class=="gd7") %>% 
+  dplyr::filter(grepl("dorsal_ectoderm|amnioserosa", active_in)) %>% 
+  pull(enhancer_id) %>% 
+  unique() %>% 
+  length()
+
+Toll10B_matching <- tiles_enh_ol_df_long_simple %>% 
+  dplyr::filter(enhancer_class=="Toll10B") %>% 
+  dplyr::filter(grepl("mesoderm", active_in)) %>% 
+  pull(enhancer_id) %>% 
+  unique() %>% 
+  length()
+
+Tollrm910_matching <- tiles_enh_ol_df_long_simple %>% 
+  dplyr::filter(enhancer_class=="Tollrm910") %>% 
+  dplyr::filter(grepl("procephalic|brain|ventral_nerve_cord|ventral_ectoderm", active_in)) %>% 
+  pull(enhancer_id) %>% 
+  unique() %>% 
+  length()
+
+total_each <- tiles_enh_ol_df_long_simple %>% 
+  dplyr::select(enhancer_id, enhancer_class) %>% 
+  unique() %>% 
+  pull(enhancer_class) %>% 
+  table()
+
+```
+
+There are `r total_each[["gd7"]]` gd7 enhancers that overlap VT tiles that are active in stage 4-6 or stage 7-8, of which `r gd7_matching` are active in either dorsal ectoderm or amnioserosa precursors/subsets. There are `r total_each[["Tollrm910"]]` Tollrm910 enhancers that overlap VT tiles that are active in stage 4-6 or stage 7-8, of which `r Tollrm910_matching` are active in brain or ventral nerve cord precursors, procephalic ectoderm, or ventral ectoderm. There are `r total_each[["Toll10B"]]` Toll10B enhancers that overlap VT tiles that are active in stage 4-6 or stage 7-8, of which `r Toll10B_matching` are active in mesoderm precursors/subsets. 
+
+
+### Assigning enhancers to genes
+
+Koenecke et al. assigned enhancers to genes based on the nearest expressed gene. I'll define expressed genes as those that have mean TPM >= 1 in at least one genotype. I'll also remove housekeeping genes, here defined as that have at least 'low' expression in all stages and tissues from Flybase RNA-seq data (`r length(hk_gene_ids)` genes).
+
+```{r load_gene_expr}
+gene_expr_tpm <- read.table("../external_data/koenecke_2016_2017/rnaseq_results/txi_tpm_table.txt",
+                            sep = "\t", header = TRUE)
+gene_expr_tpm_mean <- gene_expr_tpm %>% 
+  tidyr::pivot_longer(-gene_id, names_to = "sample", values_to = "expr") %>% 
+  tidyr::separate(sample, sep = "_Rep", into = c("genotype", "replicate")) %>% 
+  group_by(gene_id, genotype) %>% 
+  summarise(mean_tpm = mean(expr)) 
+
+expressed_genes <- gene_expr_tpm_mean %>% 
+  dplyr::filter(mean_tpm >= 1) %>% 
+  pull(gene_id) %>% unique()
+
+expressed_non_hk_genes <- expressed_genes[!(expressed_genes %in% hk_gene_ids)]
+
+gene_ids_key %>% 
+  dplyr::filter(gene_id %in% expressed_non_hk_genes[!(expressed_non_hk_genes %in% promoters_gr$GENEID)])
+
+
+```
+
+All of the housekeeping genes except `r sum(!(hk_gene_ids %in% expressed_genes))` are considered expressed by this criterion. Out of a total of `r length(expressed_genes)`, `r sum(expressed_genes %in% hk_gene_ids)` are defined as housekeeping genes. Removing these leaves `r length(expressed_non_hk_genes)` expressed, non-housekeeping genes. 
+
+
+First I will assign any enhancers that overlap a transcript to that gene.
+
+```{r}
+all_enhancers$enhancer_id <- paste0(as.character(all_enhancers), ":", all_enhancers$class)
+names(all_enhancers) <- all_enhancers$enhancer_id
+expressed_non_hk_promoters <- promoters_gr[promoters_gr$GENEID %in% expressed_non_hk_genes]
+expressed_non_hk_transcripts <- transcripts_gr[transcripts_gr$GENEID %in% expressed_non_hk_genes]
+
+ol <- findOverlaps(all_enhancers, expressed_non_hk_transcripts)
+e_overlaps_transcript <- bind_cols(as.data.frame(unname(all_enhancers[queryHits(ol)])),
+                                   as.data.frame(mcols(expressed_non_hk_transcripts[subjectHits(ol)]))) %>% 
+  dplyr::select(-TXNAME) %>% 
+  unique()
+
+e_overlaps_transcript <- e_overlaps_transcript %>% 
+  group_by(enhancer_id) %>% 
+  mutate(n_genes = n())
+```
+
+`r length(unique(e_overlaps_transcript$enhancer_id))` putative enhancers overlap a transcript. `r length(unique(e_overlaps_transcript$enhancer_id[e_overlaps_transcript$n_genes > 1]))` of these overlap more than one transcript. 
+
+```{r}
+e_overlaps_transcript %>% 
+  dplyr::filter(n_genes > 1)
+```
+
+```{r}
+ep_assigned <- e_overlaps_transcript %>% 
+  dplyr::filter(n_genes == 1) %>% 
+  dplyr::select(enhancer_id, gene_id = GENEID) %>% 
+  dplyr::mutate(assignment_type = "overlapping")
+
+```
+
+
+I'll take enhancers that overlap more than one transcript, as well as enhancers that don't overlap any transcripts, and assign then to the nearest promoter. 
+
+```{r}
+unassigned_enhancers <- all_enhancers[!(all_enhancers$enhancer_id %in% ep_assigned$enhancer_id)]
+
+nearest <- distanceToNearest(unassigned_enhancers, expressed_non_hk_promoters)
+# nearest
+# summary(mcols(nearest)$distance)
+
+ep_df <- bind_cols(as.data.frame(unassigned_enhancers[queryHits(nearest)]) %>% 
+                    magrittr::set_colnames(paste0("enhancer_", colnames(.))),
+                   as.data.frame(expressed_non_hk_promoters[subjectHits(nearest)])%>% 
+                    magrittr::set_colnames(paste0("promoter_", colnames(.))),
+                   as.data.frame(mcols(nearest))) %>% 
+  mutate(enhancer_midpoint = (enhancer_start + enhancer_end) / 2, 
+         promoter_midpoint = promoter_start) %>% 
+  rename("enhancer_id" = "enhancer_enhancer_id")
+# table(ep_df$enhancer_midpoint > ep_df$promoter_midpoint)
+
+starts <- ifelse(ep_df$enhancer_midpoint > ep_df$promoter_midpoint,
+                 ep_df$promoter_midpoint, 
+                 ep_df$enhancer_midpoint)
+ends <- ifelse(ep_df$enhancer_midpoint > ep_df$promoter_midpoint,
+                 ep_df$enhancer_midpoint, 
+                 ep_df$promoter_midpoint)
+# table(starts < ends)
+
+ep_gap_ranges <- GRanges(seqnames = ep_df$enhancer_seqnames, 
+                         IRanges(start = starts, end = ends))
+ol <- findOverlaps(ep_gap_ranges, boundaries)
+
+ep_assigned <- ep_df[-queryHits(ol),] %>% 
+  dplyr::select(enhancer_id, gene_id = promoter_GENEID) %>%
+  dplyr::mutate(assignment_type = "closest_same_domain") %>% 
+  bind_rows(ep_assigned, . )
+```
+
+`r sum(ep_assigned$assignment_type == "closest_same_domain")` enhancers can be assigned to the nearest promoter.
+`r length(unique(queryHits(ol)))` remaining enhancers have a domain boundary between the enhancer and the nearest promoter.
+
+```{r}
+unassigned_enhancers <- all_enhancers[!(all_enhancers$enhancer_id %in% ep_assigned$enhancer_id)]
+
+assignment_list <- unassigned_enhancers %>% 
+  split(unassigned_enhancers$enhancer_id) %>% 
+  lapply(function(e){
+    tad <- subsetByOverlaps(boundary_tads, e)
+    p <- subsetByOverlaps(expressed_non_hk_promoters, tad)
+    if(length(p)==0){
+      return(NULL)
+    } else {
+      p <- p[nearest(e, p)]
+      return(data.frame(enhancer_id = e$enhancer_id, gene_id = p$GENEID, assignment_type = "same_domain_closest"))
+    }
+})
+ 
+ep_assigned <- ep_assigned %>% 
+  bind_rows(., do.call("rbind", unname(assignment_list[lengths(assignment_list) > 0 ])))
+```
+
+`r sum(ep_assigned$assignment_type == "same_domain_closest")` of these enhancers are inside a domain with at least one promoter, and have been assigned to that gene. 
+
+```{r}
+# table(ep_assigned$assignment_type)
+
+unassigned_enhancers <- all_enhancers[!(all_enhancers$enhancer_id %in% ep_assigned$enhancer_id)]
+
+nearest_p <- nearest(unassigned_enhancers, expressed_non_hk_promoters)
+ep_assigned <- bind_rows(ep_assigned,
+                         data.frame(enhancer_id = unassigned_enhancers$enhancer_id,
+                         gene_id = expressed_non_hk_promoters$GENEID[nearest_p],
+                         assignment_type = "closest"))
+table(ep_assigned$assignment_type)
+```
+
+The remaining `r sum(ep_assigned$assignment_type == "closest")` enhancers are either not in a domain, or the domain has no genes, so they will be assigned to the gene with the closest promoter. 
+
+
+```{r}
+## add enhancer details
+all_enhancers_df <- as.data.frame(all_enhancers)
+
+ep_assignments_df <- left_join(ep_assigned, all_enhancers_df) %>% 
+  left_join(gene_ids_key)
+## add expression_details
+ep_assignments_df <- gene_expr_tpm_mean %>% 
+  tidyr::pivot_wider(names_from = genotype, names_prefix = "mean_tpm_", values_from = mean_tpm) %>% 
+  left_join(ep_assignments_df, ., )
+## select columns of interest
+ep_assignments_df <- ep_assignments_df %>% 
+  dplyr::select(enhancer_id, seqnames, start, end, differential_k27ac = class, 
+         nearest_gene_id = gene_id, nearest_gene = gene_symbol, assignment_type, starts_with("mean_tpm"))
+
+## calculate distance to closest TSS of assigned gene
+promoters_gr_list <- split(promoters_gr, promoters_gr$GENEID)
+get_distance_to_nearest_tss <- function(enhancer_id, nearest_gene_id){
+  e <- all_enhancers[enhancer_id]
+  p <- promoters_gr_list[[nearest_gene_id]]
+  distance <- mcols(distanceToNearest(e, p))$distance
+  return(distance)
+}
+ep_assignments_df  <- ep_assignments_df  %>% 
+  mutate(distance_to_tss = purrr::map2_dbl(enhancer_id, nearest_gene_id, get_distance_to_nearest_tss))
+
+
+```
+
+
+```{r}
+per_gene <- ep_assignments_df %>% group_by(nearest_gene, nearest_gene_id) %>% 
+  summarise(enh_per_gene = n(),
+            min_enh = min(start),
+            max_enh = max(end)) %>%
+  mutate(domain_size = max_enh - min_enh)
+
+
+n_domains <- ep_assignments_df %>%  group_by(nearest_gene, nearest_gene_id) %>% tally() %>%  nrow()
+n_domains_per_tissue <- ep_assignments_df %>%  group_by(nearest_gene, nearest_gene_id, differential_k27ac) %>% tally() %>% nrow()
+```
+
+```{r plot_enh}
+ggplot(ep_assignments_df, aes(x = distance_to_tss)) +
+  geom_histogram() +
+  labs(x = "Distance from assigned gene", y = "Number of enhancers") +
+  theme_bw()
+
+ggplot(per_gene, aes(x = enh_per_gene)) +
+  geom_bar() +
+  labs(x = "Number of enhancers", y = "Number of genes") +
+  theme_bw()
+
+ggplot(ep_assignments_df, aes(x = distance_to_tss, colour = differential_k27ac)) +
+  geom_hline(yintercept = c(0.25, 0.5, 0.75), linetype = 2, colour = "grey") +
+  geom_line(stat = "ecdf") +
+  coord_cartesian(xlim = c(0, 75000)) +
+  labs(x = "Distance from assigned gene", y = "Cumulative distribution") +
+  theme_bw()
+
+```
+
+The median distance between an enhancer and the TSS of its assigned gene is `r median(ep_assignments_df$distance_to_tss)` bp. The median number of enhancers per gene is `r median(per_gene$enh_per_gene)`. `r sum(per_gene$enh_per_gene > 1)` genes have more than one enhancer assigned to them.
+
+### Comparing enhancer activity to their assigned target genes
+
+```{r}
+# ep_assignments_df %>% 
+#   ggplot(aes(x = mean_toll10b_k27ac_score, y = toll10b_FPKM, colour = differential_k27ac)) +
+#   geom_point() +
+#   scale_x_log10() +
+#   scale_y_log10() +
+#   scale_colour_manual(values = colour_scheme) +
+#   theme_bw() +
+#   labs(x = "Enhancer H3K27ac (Toll10B)", y = "Assigned gene expression (FPKM) (Toll10B)", colour = "Enhancer active in:") 
+# 
+# 
+# distal_enhancers_dm6 %>% 
+#   dplyr::mutate(differential_k27ac = gsub("Higher in ", "", differential_k27ac)) %>% 
+#   dplyr::mutate(differential_k27ac = gsub("Toll10b", "Toll10B", differential_k27ac)) %>% 
+#   ggplot(aes(x = mean_gd7_k27ac_score, y = gd7_FPKM, colour = differential_k27ac)) +
+#   geom_point() +
+#   scale_x_log10() +
+#   scale_y_log10() +
+#   scale_colour_manual(values = colour_scheme) +
+#   theme_bw() +
+#   labs(x = "Enhancer H3K27ac (gd7)", y = "Assigned gene expression (FPKM) (gd7)", colour = "Enhancer active in:") 
+
+ep_assignments_df %>% 
+  ggplot(aes(x = mean_tpm_tl10b, y = mean_tpm_gd7, colour = differential_k27ac)) +
+  geom_point() +
+  scale_x_log10() +
+  scale_y_log10() +
+  scale_colour_manual(values = colour_scheme) +
+  theme_bw() +
+  labs(x = "Assigned gene expression (TPM) (Toll10B)", 
+       y = "Assigned gene expression (TPM) (gd7)", 
+       colour = "Enhancer active in:") 
+
+```
+
+
+```{r fig.width=3, fig.height=4}
+p <- ep_assignments_df %>% 
+  tidyr::pivot_longer(starts_with("mean_tpm_"), names_to = "Genotype", 
+                      names_prefix = "mean_tpm_", values_to = "Expression") %>% 
+  dplyr::mutate(Genotype = case_when(Genotype == "tl10b" ~ "Toll10B",
+                                     Genotype == "tlrm910" ~ "Tollrm910",
+                                     TRUE ~ Genotype)) %>%
+  dplyr::mutate(Genotype = factor(Genotype, levels = c("gd7", "Tollrm910", "Toll10B"), ordered = TRUE)) %>% 
+  dplyr::mutate(differential_k27ac = factor(differential_k27ac, levels = c("gd7", "Tollrm910", "Toll10B"), ordered = TRUE)) %>% 
+  ggplot(aes(x = Genotype, y = Expression, fill = Genotype)) +
+  #ggbeeswarm::geom_quasirandom(dodge.width = 0.8, aes(colour = Genotype)) +
+  geom_boxplot(notch = TRUE, outlier.shape = NA) +
+  # scale_y_log10() +
+  scale_fill_manual(values = colour_scheme, guide = "none") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank()) +
+  facet_grid(differential_k27ac ~ .) +
+  labs(x = "Gene expression in", y = "Gene expression (TPM)") +
+  coord_cartesian(ylim = c(0, 150)) +
+  NULL
+p
+
+
+ep_assignments_df %>% 
+  tidyr::pivot_longer(starts_with("mean_tpm_"), names_to = "Genotype", 
+                      names_prefix = "mean_tpm_", values_to = "Expression") %>% 
+  dplyr::mutate(Genotype = case_when(Genotype == "tl10b" ~ "Toll10B",
+                                     Genotype == "tlrm910" ~ "Tollrm910",
+                                     TRUE ~ Genotype)) %>%
+  dplyr::mutate(Genotype = factor(Genotype, levels = c("gd7", "Tollrm910", "Toll10B"), ordered = TRUE)) %>% 
+  dplyr::mutate(differential_k27ac = factor(differential_k27ac, levels = c("gd7", "Tollrm910", "Toll10B"), ordered = TRUE)) %>% 
+  ggplot(aes(x = Genotype, y = Expression, fill = Genotype)) +
+  #ggbeeswarm::geom_quasirandom(dodge.width = 0.8, aes(colour = Genotype)) +
+  geom_boxplot(notch = TRUE) +
+  # scale_y_log10() +
+  scale_fill_manual(values = colour_scheme, guide = "none") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank()) +
+  facet_grid(differential_k27ac ~ .) +
+  labs(x = "Gene expression in", y = "Gene expression (TPM)") +
+  # coord_cartesian(ylim = c(0, 150)) +
+  NULL
+
+
+# pdf("../figures/figure_1_panels/csaw_assigned_gene_expr_boxplots.pdf",
+#     width = 2, height = 4)
+# p
+# dev.off()
+
+ep_assignments_df %>% 
+  tidyr::pivot_longer(starts_with("mean_tpm_"), names_to = "Genotype", 
+                      names_prefix = "mean_tpm_", values_to = "Expression") %>% 
+  dplyr::mutate(Genotype = case_when(Genotype == "tl10b" ~ "Toll10B",
+                                     Genotype == "tlrm910" ~ "Tollrm910",
+                                     TRUE ~ Genotype)) %>%
+  dplyr::mutate(Genotype = factor(Genotype, levels = c("gd7", "Tollrm910", "Toll10B"), ordered = TRUE)) %>% 
+  dplyr::mutate(differential_k27ac = factor(differential_k27ac, levels = c("gd7", "Tollrm910", "Toll10B"), 
+                                            ordered = TRUE)) %>% 
+  group_by(differential_k27ac) %>% 
+  summarise(p_gd7_Tollrm910 = format.pval(wilcox.test(Expression[Genotype == "gd7"], 
+                                          Expression[Genotype == "Tollrm910"])$p.value, digits = 3),
+            p_gd7_Toll10B = format.pval(wilcox.test(Expression[Genotype == "gd7"], 
+                                        Expression[Genotype == "Toll10B"])$p.value, digits = 3),
+            p_Tollrm910_Toll10B = format.pval(wilcox.test(Expression[Genotype == "Toll10B"], 
+                                              Expression[Genotype == "Tollrm910"])$p.value, digits = 3))
+
+```
+
+```{r fig.width = 5, fig.height = 4}
+pdf("../figures/figure_1_panels/enhancers_meta_and_boxplots.pdf",
+    width = 5, height = 4)
+cowplot::plot_grid(enhancer_meta_plot + theme(legend.position = "bottom"), 
+                   p + theme(axis.text.x = element_text(angle = 45, hjust = 1)),
+                   nrow = 1, rel_widths = c(1.5, 1), 
+                   align = "h", axis = "tb")
+dev.off()
+```
+
+```{r}
+reduce_values <- function(col){
+  val <- unique(col)
+  if(length(val) > 1){
+    val <- "Multiple"
+  }
+  return(val)
+}
+
+enhancers_by_gene <- ep_assignments_df %>% 
+  group_by(nearest_gene, nearest_gene_id, mean_tpm_gd7, mean_tpm_tl10b, 
+           mean_tpm_tlrm910, differential_k27ac) %>% 
+  tally() %>% 
+  group_by(nearest_gene, nearest_gene_id, mean_tpm_gd7, mean_tpm_tl10b, mean_tpm_tlrm910) %>% 
+  summarise(enhancers = reduce_values(differential_k27ac))
+
+enhancers_by_gene %>% 
+  ggplot(aes(x = mean_tpm_tl10b, y = mean_tpm_gd7, colour = enhancers)) +
+  geom_point() +
+  scale_x_log10() +
+  scale_y_log10() +
+  scale_colour_manual(values = c("Multiple" = "grey", colour_scheme)) +
+  theme_bw() +
+  labs(x = "Gene expression (TPM) (Toll10B)", 
+       y = "Gene expression (TPM) (gd7)", 
+       colour = "Gene has enhancers in:")
+
+
+enhancers_by_gene %>% 
+  tidyr::pivot_longer(starts_with("mean_tpm_"), names_to = "Genotype", 
+                      names_prefix = "mean_tpm_", values_to = "Expression") %>% 
+  dplyr::mutate(Genotype = case_when(Genotype == "tl10b" ~ "Toll10B",
+                                     Genotype == "tlrm910" ~ "Tollrm910",
+                                     TRUE ~ Genotype)) %>%
+  dplyr::mutate(Genotype = factor(Genotype, levels = c("gd7", "Tollrm910", "Toll10B"), ordered = TRUE)) %>% 
+  dplyr::mutate(enhancers = factor(enhancers, 
+                                            levels = c("gd7", "Tollrm910", "Toll10B", "Multiple"), ordered = TRUE)) %>% 
+  ggplot(aes(x = enhancers, y = Expression, fill = enhancers)) +
+  #ggbeeswarm::geom_quasirandom(dodge.width = 0.8, aes(colour = Genotype)) +
+  geom_boxplot(notch = TRUE) +
+  scale_y_log10() +
+  scale_fill_manual(values = colour_scheme, guide = "none") +
+  theme_bw() +
+  facet_grid(~ Genotype) +
+  labs(x = "Enhancer active in:", fill = "Gene expression in:", y = "Gene expression (TPM)")
+
+```
+
+
+### Export enhancer-gene assignments
+
+```{r}
+tmp <- ep_assignments_df %>% 
+  rename("enhancer_in" = "differential_k27ac",  "gene_id" = "nearest_gene_id", 
+         "gene_symbol" = "nearest_gene", "assignment_class" = "assignment_type")
+write.table(tmp, "csaw_stringent_enhancer_gene_assignments.txt", 
+            quote = FALSE, sep = "\t", col.names = TRUE, row.names = FALSE)
+
+readme_df <- tibble::tribble(
+  ~column, ~description,
+  "enhancer_id", "Enhancer identifier",
+  "seqnames", "Enhancer chromosome",
+  "start", "Enhancer start coordinate (1-based)",
+  "end", "Enhancer end coordinate (1-based)",
+  "enhancer_in", "Genotype in which enhancer is enriched for H3K27ac",
+  "gene_id", "Flybase gene ID for assigned target gene",
+  "gene_symbol", "Flybase gene symbol for assigned target gene",
+  "assignment_class", glue::glue("How the gene was assigned to the enhancer. Only \\
+                                  expressed, non-housekeeping genes were considered. \\
+                                  See Methods for a full description of how these genes were chosen. \\
+                                  'overlapping': enhancer is within the gene body.
+                                  'closest_same_domain': the gene is the closest gene \\
+                                  to the enhancer, and is within the same domain.
+                                  'same_domain_closest': the gene is the closest gene \\
+                                  to the enhancer that is within the same domain.
+                                  'closest': the enhancer is outside a domain or there \\
+                                  are no genes in the domain, so it is assigned to the closest gene."),
+  "mean_tpm_gd7", "Mean Salmon tpm in gd7 embryos",
+  "mean_tpm_tl10b", "Mean Salmon tpm in Toll10B embryos",
+  "mean_tpm_tlrm910", "Mean Salmon tpm in Tollrm9/rm10 embryos",
+  "distance_to_tss", "Distance between enhancer and closest TSS of the assigned gene")
+writexl::write_xlsx(list("Table description" = readme_df, "Table S1" = tmp),
+                    path = "../data/supplementary_tables/TableS1_enhancer_gene_assignments.xlsx")
+```
+
+### Comparing enhancers to TADs and GRBs
+
+```{r, fig.width=10}
+all_enhancers$boundary_tad_overlap <- ifelse(countOverlaps(all_enhancers, boundary_tads) > 0, "yes", "no")
+all_enhancers$grb_overlap <- ifelse(countOverlaps(all_enhancers, grbs) > 0, "yes", "no")
+
+
+p2 <- as.data.frame(all_enhancers) %>%
+  ggplot(aes(fill = boundary_tad_overlap, x = class)) +
+  geom_bar(position = "stack") +
+  scale_fill_manual(values = c("grey", "black")) +
+  theme_bw() +
+  labs(x = "Overlapping boundary TADs", y = "Number of enhancers")
+
+p3 <- as.data.frame(all_enhancers) %>%
+  ggplot(aes(x = class, fill = grb_overlap)) +
+  geom_bar(position = "stack") +
+  scale_fill_manual(values = c("grey", "black")) +
+  theme_bw() +
+  labs(x = "Overlapping GRBs", y = "Number of enhancers")
+
+cowplot::plot_grid(p2, p3, nrow = 1)
+
+p2 <- as.data.frame(all_enhancers) %>%
+  ggplot(aes(fill = boundary_tad_overlap, x = class)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) + 
+  scale_fill_manual(values = c("grey", "black")) +
+  theme_bw() +
+  labs(x = "Overlapping boundary TADs", y = "Number of enhancers")
+
+p3 <- as.data.frame(all_enhancers) %>%
+  ggplot(aes(x = class, fill = grb_overlap)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) + 
+  scale_fill_manual(values = c("grey", "black")) +
+  theme_bw() +
+  labs(x = "Overlapping GRBs", y = "Number of enhancers")
+
+cowplot::plot_grid(p2, p3, nrow = 1)
+```
+
+```{r}
+boundary_tads$tad_id <- as.character(boundary_tads)
+boundary_tads$has_enh <- countOverlaps(boundary_tads, all_enhancers) > 0
+boundary_tads$num_genes <- countOverlaps(boundary_tads, promoters_gr)
+boundary_tads$genes_per_kb <- boundary_tads$num_genes / (width(boundary_tads)/1000)
+boundary_tads$overlaps_grb <- countOverlaps(boundary_tads, grbs) > 0
+
+boundary_tads_df <- as.data.frame(boundary_tads) %>% 
+  dplyr::mutate(has_enh = ifelse(has_enh, "yes", "no"),
+                overlaps_grb = ifelse(overlaps_grb, "yes", "no"))
+
+size_p <- wilcox.test(width(boundary_tads) ~ boundary_tads$has_enh)
+promoters_p <- wilcox.test(boundary_tads$num_genes ~ boundary_tads$has_enh)
+promoter_density_p <- wilcox.test(boundary_tads$genes_per_kb ~ boundary_tads$has_enh)
+
+
+p_domain_size <- ggplot(boundary_tads_df, aes(colour = has_enh, x = width)) +
+  geom_line(stat = "ecdf") +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_continuous(labels = scales::unit_format(unit = "", scale = 1e-3)) +
+  coord_cartesian(xlim = c(0, 3e5)) +
+  scale_color_manual(values = c("darkgrey", "black")) +
+  labs(x = "Domain size (kb)", y = "% of domains", colour = "Contains\nenhancers") +
+  annotate(geom="text", x = 0, y = 1, 
+            label = paste0("p = ", format.pval(size_p$p.value, 2)), hjust = 0)
+p_domain_size
+
+# pdf("../figures/figure_1_panels/size_of_domains_with_enhancers.pdf",
+#     width = 3, height = 3)
+# p_domain_size
+# dev.off()
+
+grbs_pval <-chisq.test(table(boundary_tads$has_enh, boundary_tads$overlaps_grb))
+
+p_grbs <- ggplot(boundary_tads_df, aes(x = has_enh, fill = overlaps_grb)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) + 
+  theme_bw(base_size = 12) +
+  scale_fill_manual("Overlaps GRB", values = c("yes" = "black", "no" = "grey")) +
+  labs(x = "Contains enhancers", y = "% of domains") +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  coord_cartesian(ylim = c(0, 1.05)) +
+  annotate(geom="text", x = 1.5, y = 1.05, 
+            label = paste0("p = ", format.pval(grbs_pval$p.value, 2)))
+p_grbs  
+
+```
+
+```{r fig.width = 2, fig.height = 3}
+p_gene_density <- ggplot(boundary_tads_df, aes(x = has_enh, y = genes_per_kb)) +
+  geom_boxplot(notch = TRUE) +
+  theme_bw(base_size = 12) +
+  theme(panel.grid.minor = element_blank()) +
+  labs(x = "Contains enhancers", y = "Genes per kb") +
+  annotate(geom="text", x = 1.5, y = 2.2, 
+            label = paste0("p = ", format.pval(promoter_density_p$p.value, 2)))
+p_gene_density
+
+# pdf(file.path(basedir, "figures/figure_1_panels/csaw_gene_density_of_domains_with_enhancers.pdf"),
+#     width = 3, height = 3)
+# p_gene_density
+# dev.off()
+```
+
+```{r fig.width=7, fig.height=3}
+
+pdf(file.path(basedir, "figures/figure_1_panels/domain_size_gene_density_grbs.pdf"),
+    width = 7, height = 3)
+cowplot::plot_grid(p_domain_size, p_gene_density, p_grbs, nrow = 1, 
+                   align = "h", axis = "tb", rel_widths = c(1.5, 1, 1))
+dev.off()
+```
+
+
+`r sum(boundary_tads$has_enh)` domains (out of a total of `r length(boundary_tads)`contain one or more enhancers. The mean size of domains containing an  enhancer is `r mean(width(boundary_tads[boundary_tads$has_enh]))/1000` kb, while the mean size of domains without an enhancer is `r mean(width(boundary_tads[!boundary_tads$has_enh]))/1000` kb. This is a significant difference with p = `r size_p$p.value`.
+
+The mean number of promoters inside domains containing an  enhancer is `r mean(boundary_tads$num_genes[boundary_tads$has_enh])`, while the mean number of promoters inside domains without an enhancer is `r mean(boundary_tads$num_genes[!boundary_tads$has_enh])`. This is a significant difference with p = `r promoters_p$p.value`.
+
+The median number of promoters per kb inside domains containing an  enhancer is `r median(boundary_tads$genes_per_kb[boundary_tads$has_enh])`, while the median number of promoters per kb inside domains without an enhancer is `r median(boundary_tads$genes_per_kb[!boundary_tads$has_enh])`. The wilcox test p value for this is p = `r promoter_density_p$p.value`
+
+
+### Constructing enhancer-promoter 'loops'
+
+In order to assess whether enhancer-promoter interactions are stronger in cells where both are active, I will construct enhancer-promoter loops as bedpe files and use these to make loop aggregates. I'll use the enhancer as the first anchor of the loop and the promoter as the second anchor of the loop.
+
+```{r make_ep_loops, cache=TRUE}
+promoters_200bp <- transcripts_gr %>% 
+  promoters(upstream = 100, downstream = 100) %>% 
+  unique() %>% 
+  as.data.frame()
+
+ep_df <- ep_assignments_df %>% 
+  dplyr::select(seqnames, start, end, enhancer_id, nearest_gene, nearest_gene_id, 
+                differential_k27ac, distance_to_tss) %>%
+  left_join(promoters_200bp, 
+            by = c("nearest_gene_id" = "GENEID")) 
+
+ep_df <- ep_df %>% 
+  mutate(enhancer_upstream = start.y > start.x) %>%
+  mutate(ep_distance = case_when(
+    enhancer_upstream ~ (start.y - end.x),
+    !enhancer_upstream ~ (start.x - end.y)
+    )) %>%
+  mutate(flipped_tss_start = case_when(
+    enhancer_upstream ~ start.x - ep_distance - 200L,
+    !enhancer_upstream ~ end.x + ep_distance)) %>% 
+  mutate(flipped_tss_end = case_when(
+    enhancer_upstream ~ start.x - ep_distance,
+    !enhancer_upstream ~ end.x + ep_distance + 200L))
+
+
+tmp_df_summary <- ep_df %>% 
+  group_by(differential_k27ac) %>%
+  summarise(median = median(distance_to_tss))
+
+ggplot(ep_df, aes(x = distance_to_tss, fill = differential_k27ac)) +
+  geom_histogram(position = "dodge") +
+  geom_vline(aes(xintercept = median, colour = differential_k27ac), 
+             linetype = 2, data = tmp_df_summary) +
+  theme_bw() +
+  scale_fill_manual(values = colour_scheme) +
+  scale_colour_manual(values = colour_scheme, guide = "none") +
+  scale_x_continuous(labels = scales::unit_format(scale = 1e-3, unit = "kb"), limits = c(0, 50000)) +
+  labs(x = "Distance", y = "Number of E-P pairs", fill = "Enhancer active in:")
+  
+```
+
+A lot of E-P loops are very short. I'll only consider loops that are at least 5 kb (5 bins at 1 kb resolution). 
+
+```{r write_ep_loops, cache=TRUE, dependson="make_ep_loops"}
+# gd7 enhancer-promoter
+ep_df %>% 
+  dplyr::filter(ep_distance >= 5000) %>% 
+  dplyr::filter(differential_k27ac == "gd7") %>% 
+  dplyr::select(seqnames.x, start.x, end.x, seqnames.y, start.y, end.y, enhancer_id) %>% 
+  write.table(sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE,
+              file = file.path(basedir, "data/loops/enhancer_promoter_loops/gd7_csaw_ep_all_loops.bedpe"))
+
+# gd7 enhancer-flipped
+ep_df %>% 
+  dplyr::filter(ep_distance >= 5000) %>% 
+  dplyr::filter(differential_k27ac == "gd7") %>% 
+  dplyr::select(seqnames.x, start.x, end.x, seqnames.y, flipped_tss_start, 
+                flipped_tss_end, enhancer_id) %>% 
+  write.table(sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE,
+              file = file.path(basedir, "data/loops/enhancer_promoter_loops/gd7_csaw_ef_all_loops.bedpe"))
+
+# toll10B enhancer-promoter
+ep_df %>% 
+  dplyr::filter(ep_distance >= 5000) %>% 
+  dplyr::filter(differential_k27ac == "Toll10B") %>% 
+  dplyr::select(seqnames.x, start.x, end.x, seqnames.y, start.y, end.y, enhancer_id) %>% 
+  write.table(sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE,
+              file = file.path(basedir, "data/loops/enhancer_promoter_loops/Toll10B_csaw_ep_all_loops.bedpe"))
+
+# toll10B enhancer-flipped
+ep_df %>% 
+  dplyr::filter(ep_distance >= 5000) %>% 
+  dplyr::filter(differential_k27ac == "Toll10B") %>% 
+  dplyr::select(seqnames.x, start.x, end.x, seqnames.y, flipped_tss_start, 
+                flipped_tss_end, enhancer_id) %>% 
+  write.table(sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE,
+              file = file.path(basedir, "data/loops/enhancer_promoter_loops/Toll10B_csaw_ef_all_loops.bedpe"))
+
+# tollrm910 enhancer-promoter
+ep_df %>% 
+  dplyr::filter(ep_distance >= 5000) %>% 
+  dplyr::filter(differential_k27ac == "Tollrm910") %>% 
+  dplyr::select(seqnames.x, start.x, end.x, seqnames.y, start.y, end.y, enhancer_id) %>% 
+  write.table(sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE,
+              file = file.path(basedir, "data/loops/enhancer_promoter_loops/Tollrm910_csaw_ep_all_loops.bedpe"))
+
+# tollrm910 enhancer-flipped
+ep_df %>% 
+  dplyr::filter(ep_distance >= 5000) %>% 
+  dplyr::filter(differential_k27ac == "Tollrm910") %>% 
+  dplyr::select(seqnames.x, start.x, end.x, seqnames.y, flipped_tss_start, 
+                flipped_tss_end, enhancer_id) %>% 
+  write.table(sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE,
+              file = file.path(basedir, "data/loops/enhancer_promoter_loops/Tollrm910_csaw_ef_all_loops.bedpe"))
+
+```
+
+
+I'll also make loops that use the promoter as the reference point and flip the position of the enhancer. 
+
+
+```{r}
+pe_df <- ep_assignments_df %>% 
+  dplyr::select(seqnames, start, end, enhancer_id, nearest_gene, nearest_gene_id, 
+                differential_k27ac) %>%
+  left_join(promoters_200bp, 
+            by = c("nearest_gene_id" = "GENEID")) 
+
+pe_df <- pe_df %>% 
+  mutate(enhancer_upstream = start.y > start.x) %>%
+  mutate(ep_distance = case_when(
+    enhancer_upstream ~ (start.y - end.x),
+    !enhancer_upstream ~ (start.x - end.y)
+    )) %>%
+  mutate(flipped_enh_start = case_when(
+    enhancer_upstream ~ end.y + ep_distance,
+    !enhancer_upstream ~ start.y - ep_distance - 200L)) %>% 
+  mutate(flipped_enh_end = case_when(
+    enhancer_upstream ~ end.y + ep_distance + 200L,
+    !enhancer_upstream ~ start.y - ep_distance))
+
+```
+
+```{r write_pf_loops, cache=TRUE, dependson="make_ep_loops"}
+# gd7 enhancer-promoter
+pe_df %>% 
+  dplyr::filter(ep_distance >= 5000) %>% 
+  dplyr::filter(differential_k27ac == "gd7") %>% 
+  dplyr::select(seqnames.y, start.y, end.y, seqnames.x, flipped_enh_start, flipped_enh_end, enhancer_id) %>% 
+  write.table(sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE,
+              file = file.path(basedir, "data/loops/enhancer_promoter_loops/gd7_csaw_pf_all_loops.bedpe"))
+
+# toll10B enhancer-promoter
+pe_df %>% 
+  dplyr::filter(ep_distance >= 5000) %>% 
+  dplyr::filter(differential_k27ac == "Toll10B") %>% 
+  dplyr::select(seqnames.y, start.y, end.y, seqnames.x, flipped_enh_start, flipped_enh_end, enhancer_id) %>% 
+  write.table(sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE,
+              file = file.path(basedir, "data/loops/enhancer_promoter_loops/Toll10B_csaw_pf_all_loops.bedpe"))
+
+# tollrm910 enhancer-flipped
+pe_df %>% 
+  dplyr::filter(ep_distance >= 5000) %>% 
+  dplyr::filter(differential_k27ac == "Tollrm910") %>% 
+  dplyr::select(seqnames.y, start.y, end.y, seqnames.x, flipped_enh_start, flipped_enh_end, enhancer_id) %>% 
+  write.table(sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE,
+              file = file.path(basedir, "data/loops/enhancer_promoter_loops/Tollrm910_csaw_pf_all_loops.bedpe"))
+
+```
+
+
+### Comparing genes to TADs and GRBs
+
+`r sum(hk_gene_ids %in% ep_assignments_df$nearest_gene_id)` of the housekeeping genes from Flybase are also the nearest gene to a DV enhancer, because I pre-filtered housekeeping genes! 
+
+```{r, fig.width=10}
+# hk_gene_ids <- hk_gene_ids[!hk_gene_ids %in% distal_enhancers_dm6$nearest_gene_id]
+
+genes_with_enhancers <- unique(ep_assignments_df$nearest_gene_id)
+promoters_gr$class <- case_when(
+                             promoters_gr$GENEID %in% genes_with_enhancers ~ "DV-regulated",
+                             promoters_gr$GENEID %in% hk_gene_ids ~ "housekeeping",
+                             TRUE ~ "other")
+# table(promoters_gr$class)
+
+promoters_gr$boundary_tad_overlap <- ifelse(countOverlaps(promoters_gr, boundary_tads) > 0, "yes", "no")
+promoters_gr$grb_overlap <- ifelse(countOverlaps(promoters_gr, grbs) > 0, "yes", "no")
+promoters_gr$distance_to_boundary <- mcols(distanceToNearest(promoters_gr, boundaries))$distance
+
+promoters_gr_df <- as.data.frame(promoters_gr) %>% 
+  dplyr::filter(class != "other")
+
+p2 <- promoters_gr_df %>%
+  ggplot(aes(fill = boundary_tad_overlap, x = class)) +
+  geom_bar(position = "stack") +
+  scale_fill_manual(values = c("grey", "black")) +
+  theme_bw() +
+  labs(x = "Overlapping boundary TADs", y = "Number of promoters")
+
+p3 <- promoters_gr_df %>%
+  ggplot(aes(x = class, fill = grb_overlap)) +
+  geom_bar(position = "stack") +
+  scale_fill_manual(values = c("grey", "black")) +
+  theme_bw() +
+  labs(x = "Overlapping GRBs", y = "Number of promoters")
+
+cowplot::plot_grid(p2, p3, nrow = 1)
+
+
+p2 <- promoters_gr_df %>%
+  ggplot(aes(fill = boundary_tad_overlap, x = class)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) + 
+  scale_fill_manual(values = c("grey", "black")) +
+  theme_bw() +
+  labs(x = "Overlapping boundary TADs", y = "Number of promoters")
+
+p3 <- promoters_gr_df %>%
+  ggplot(aes(x = class, fill = grb_overlap)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) + 
+  scale_fill_manual(values = c("grey", "black")) +
+  theme_bw() +
+  labs(x = "Overlapping GRBs", y = "Number of promoters")
+
+cowplot::plot_grid(p2, p3, nrow = 1)
+```
+
+
+```{r}
+promoters_gr_df %>% 
+  ggplot(aes(y = distance_to_boundary, x = class)) +
+  geom_violin() +
+  geom_boxplot(notch = TRUE, width = 0.1) +
+  theme_bw() +
+  scale_y_continuous(limits = c(0, 10^5), labels = scales::unit_format(unit = "kb", scale = 10^-3)) +
+  labs(y = "Distance to nearest boundary", x = "")
+
+wilcox.test(promoters_gr_df$distance_to_boundary ~ promoters_gr_df$class)
+
+tad_size_df <- bind_rows(
+  "DV-regulated" = as.data.frame(subsetByOverlaps(boundary_tads, 
+                                                  promoters_gr[promoters_gr$class == "DV-regulated"])),
+  "housekeeping" = as.data.frame(subsetByOverlaps(boundary_tads, 
+                                                  promoters_gr[promoters_gr$class == "housekeeping"])),
+  .id = "gene_class")
+
+ggplot(tad_size_df, aes(y = width, x = gene_class)) +
+  geom_violin() +
+  geom_boxplot(notch = TRUE, width = 0.2) +  
+  scale_y_continuous(labels = scales::unit_format(unit = "kb", scale = 10^-3)) +
+  theme_bw()
+
+wilcox.test(tad_size_df$width ~ tad_size_df$gene_class)
+```
+
+## Regulatory domains
+
+To identify regulatory domains for each gene, I will identify enhancers assigned to each gene and take the region that encompasses all those enhancers as the putative regulatory domain for that gene. Some genes have enhancers in both tissues. The regulatory domains for these tissues may be different, but I will combine the enhancers active in both tissues for the purpose of defining a general regulatory domain.
+
+These will be minimal regulatory domains, as each gene may have additional regulatory elements that are not defined here or are not active at these stages of development. 
+
+```{r}
+per_gene %>% filter(enh_per_gene > 1) %>%
+  ggplot(aes(x = domain_size)) +
+  geom_hline(yintercept = c(0.25, 0.5, 0.75), linetype = 2, colour = "grey") +
+  geom_line(stat = "ecdf") +
+  coord_cartesian(xlim = c(0, 100000)) +
+  labs(x = "Enhancer domain size", y = "Cumulative distribution") +
+  theme_bw()
+```
+
+The median size of regulatory domains for genes with at least two enhancers is `r median(per_gene$domain_size[per_gene$enh_per_gene > 1])` bp. 
+
+
+### Comparing regulatory domains to TADs and GRBs
+
+```{r}
+enh_domains <- ep_assignments_df %>%
+  group_by(nearest_gene, nearest_gene_id, seqnames) %>%
+  summarise(enh_per_gene = n(),
+            min_enh = min(start),
+            max_enh = max(end)) %>%
+  filter(enh_per_gene > 1) %>%
+  mutate(strand = "*") %>%
+  makeGRangesFromDataFrame(start.field = "min_enh", end.field = "max_enh", keep.extra.columns = TRUE)
+seqlevelsStyle(enh_domains) <- "Ensembl"
+```
+
+There are `r length(enh_domains)` enhancer domains with a median width of `r signif(median(width(enh_domains))/1000, 3)` kb and a mean of `r mean(enh_domains$enh_per_gene)` enhancers.
+
+```{r}
+enh_domains$tad_overlap <- countOverlaps(enh_domains, boundary_tads)
+enh_domains$tad_overlap[enh_domains %within% boundary_tads] <- "within"
+
+enh_domains$grb_overlap <- countOverlaps(enh_domains, grbs)
+enh_domains$grb_overlap[enh_domains %within% grbs] <- "within"
+
+p1 <- as.data.frame(enh_domains) %>%
+   mutate(tad_overlap = factor(tad_overlap, levels = c("within", 0:max(as.numeric(.$tad_overlap), na.rm = TRUE)))) %>% 
+  ggplot(aes(x = tad_overlap)) +
+  geom_bar() +
+  labs(x = "Overlapping TADs", y = "Number of domains")
+
+p2 <- as.data.frame(enh_domains) %>%
+   mutate(grb_overlap = factor(grb_overlap, levels = c("within", 0:max(as.numeric(.$tad_overlap), na.rm = TRUE)))) %>% 
+  ggplot(aes(x = grb_overlap)) +
+  geom_bar() +
+  labs(x = "Overlapping GRBs", y = "Number of domains")
+
+cowplot::plot_grid(p1, p2)
+```
+
+As expected given the small size of the regulatory domains defined here, most of them fall inside a single TAD or GRB. 
+
+
+## Breakpoints
+
+Are any enhancers close to brekapoints in TM3?
+
+```{r}
+d <- distanceToNearest(TM3_breakpoints, all_enhancers)
+d
+
+# as.character(resize(TM3_breakpoints, fix = "center", width = 100000))
+nearest_to_breakpoint <- all_enhancers$enhancer_id[subjectHits(d)[which.min(mcols(d)$distance)]]
+nearest_gene <- ep_assignments_df %>% 
+  filter(enhancer_id == nearest_to_breakpoint) %>% 
+  pull(nearest_gene_id)
+```
+
+
+The closest a D-V enhancer is to a breakpoint is `r signif(min(mcols(d)$distance)/1000, 2)` kb. This is an enhancer assigned to `r nearest_gene`.
+
+All others are further away and are unlikely to have an impact on regulation by these enhancers. 
+
+## Koenecke et al enhancers
+
+```{r read_koenecke_enhancers}
+distal_enhancers_dm6 <- read.table(file.path(basedir, "../external_data/koenecke_2016_2017/enhancers/distal_enhancers_dm6.txt"),
+                                   header = TRUE, sep = "\t")
+koenecke_enhancers <- distal_enhancers_dm6 %>% 
+  dplyr::select(seqnames, start, end, class = differential_k27ac) %>% 
+  mutate(class = case_when(class == "Higher in Toll10b" ~ "Toll10B",
+                           class == "Higher in gd7" ~ "gd7",
+                           TRUE ~ NA_character_)) %>% 
+  makeGRangesFromDataFrame(keep.extra.columns = TRUE)
+seqlevelsStyle(koenecke_enhancers) <- "Ensembl"
+```
+
+There are `r nrow(distal_enhancers_dm6)` putative enhancers. These are defined in dm3, so I've lifted them over to dm6 - all enhancers are successfully lifted over as 1:1 regions. `r sum(distal_enhancers_dm6$differential_k27ac == "Higher in gd7")` have higher H3K27ac in gd7 (putative dorsal ectoderm enhancers) and `r sum(distal_enhancers_dm6$differential_k27ac == "Higher in Toll10b")` have higher H3K27ac in Toll10B (putative mesoderm enhancers).
+
+I will re-assign enhancers to genes using the approach I'm using for my enhancers.
+
+### Assigning enhancers to genes
+
+First I will assign any enhancers that overlap a transcript to that gene.
+
+```{r}
+koenecke_enhancers$enhancer_id <- paste0(as.character(koenecke_enhancers), ":", koenecke_enhancers$class)
+names(koenecke_enhancers) <- koenecke_enhancers$enhancer_id
+expressed_non_hk_promoters <- promoters_gr[promoters_gr$GENEID %in% expressed_non_hk_genes]
+expressed_non_hk_transcripts <- transcripts_gr[transcripts_gr$GENEID %in% expressed_non_hk_genes]
+
+ol <- findOverlaps(koenecke_enhancers, expressed_non_hk_transcripts)
+e_overlaps_transcript <- bind_cols(as.data.frame(unname(koenecke_enhancers[queryHits(ol)])),
+                                   as.data.frame(mcols(expressed_non_hk_transcripts[subjectHits(ol)]))) %>% 
+  dplyr::select(-TXNAME) %>% 
+  unique()
+
+e_overlaps_transcript <- e_overlaps_transcript %>% 
+  group_by(enhancer_id) %>% 
+  mutate(n_genes = n())
+```
+
+`r length(unique(e_overlaps_transcript$enhancer_id))` putative enhancers overlap a transcript. `r length(unique(e_overlaps_transcript$enhancer_id[e_overlaps_transcript$n_genes > 1]))` of these overlap more than one transcript. 
+
+```{r}
+e_overlaps_transcript %>% 
+  dplyr::filter(n_genes > 1)
+```
+
+```{r}
+koenecke_ep_assigned <- e_overlaps_transcript %>% 
+  dplyr::filter(n_genes == 1) %>% 
+  dplyr::select(enhancer_id, gene_id = GENEID) %>% 
+  dplyr::mutate(assignment_type = "overlapping")
+
+```
+
+
+I'll take enhancers that overlap more than one transcript, as well as enhancers that don't overlap any transcripts, and assign then to the nearest promoter. 
+
+```{r}
+unassigned_enhancers <- koenecke_enhancers[!(koenecke_enhancers$enhancer_id %in% koenecke_ep_assigned$enhancer_id)]
+
+nearest <- distanceToNearest(unassigned_enhancers, expressed_non_hk_promoters)
+# nearest
+# summary(mcols(nearest)$distance)
+
+
+ep_df <- bind_cols(as.data.frame(unassigned_enhancers[queryHits(nearest)]) %>% 
+                    magrittr::set_colnames(paste0("enhancer_", colnames(.))),
+                   as.data.frame(expressed_non_hk_promoters[subjectHits(nearest)])%>% 
+                    magrittr::set_colnames(paste0("promoter_", colnames(.))),
+                   as.data.frame(mcols(nearest))) %>% 
+  mutate(enhancer_midpoint = (enhancer_start + enhancer_end) / 2, 
+         promoter_midpoint = promoter_start) %>% 
+  rename("enhancer_id" = "enhancer_enhancer_id")
+# table(ep_df$enhancer_midpoint > ep_df$promoter_midpoint)
+
+starts <- ifelse(ep_df$enhancer_midpoint > ep_df$promoter_midpoint,
+                 ep_df$promoter_midpoint, 
+                 ep_df$enhancer_midpoint)
+ends <- ifelse(ep_df$enhancer_midpoint > ep_df$promoter_midpoint,
+                 ep_df$enhancer_midpoint, 
+                 ep_df$promoter_midpoint)
+# table(starts < ends)
+
+ep_gap_ranges <- GRanges(seqnames = ep_df$enhancer_seqnames, 
+                         IRanges(start = starts, end = ends))
+ol <- findOverlaps(ep_gap_ranges, boundaries)
+
+koenecke_ep_assigned <- ep_df[-queryHits(ol),] %>% 
+  dplyr::select(enhancer_id, gene_id = promoter_GENEID) %>%
+  dplyr::mutate(assignment_type = "closest_same_domain") %>% 
+  bind_rows(koenecke_ep_assigned, . )
+```
+
+`r sum(koenecke_ep_assigned$assignment_type == "closest_same_domain")` enhancers can be assigned to the nearest promoter.
+`r length(unique(queryHits(ol)))` remaining enhancers have a domain boundary between the enhancer and the nearest promoter.
+
+```{r}
+unassigned_enhancers <- koenecke_enhancers[!(koenecke_enhancers$enhancer_id %in% koenecke_ep_assigned$enhancer_id)]
+
+assignment_list <- unassigned_enhancers %>% 
+  split(unassigned_enhancers$enhancer_id) %>% 
+  lapply(function(e){
+    tad <- subsetByOverlaps(boundary_tads, e)
+    p <- subsetByOverlaps(expressed_non_hk_promoters, tad)
+    if(length(p)==0){
+      return(NULL)
+    } else {
+      p <- p[nearest(e, p)]
+      return(data.frame(enhancer_id = e$enhancer_id, gene_id = p$GENEID, assignment_type = "same_domain_closest"))
+    }
+})
+ 
+koenecke_ep_assigned <- koenecke_ep_assigned %>% 
+  bind_rows(., do.call("rbind", unname(assignment_list[lengths(assignment_list) > 0 ])))
+```
+
+`r sum(koenecke_ep_assigned$assignment_type == "same_domain_closest")` of these enhancers are inside a domain with at least one promoter, and have been assigned to that gene. 
+
+```{r}
+# table(koenecke_ep_assigned$assignment_type)
+
+unassigned_enhancers <- koenecke_enhancers[!(koenecke_enhancers$enhancer_id %in% koenecke_ep_assigned$enhancer_id)]
+
+nearest_p <- nearest(unassigned_enhancers, expressed_non_hk_promoters)
+koenecke_ep_assigned <- bind_rows(koenecke_ep_assigned,
+                         data.frame(enhancer_id = unassigned_enhancers$enhancer_id,
+                         gene_id = expressed_non_hk_promoters$GENEID[nearest_p],
+                         assignment_type = "closest"))
+table(koenecke_ep_assigned$assignment_type)
+```
+
+The remaining `r sum(koenecke_ep_assigned$assignment_type == "closest")` enhancers are either not in a domain, or the domain has no genes, so they will be assigned to the gene with the closest promoter. 
+
+
+```{r}
+## add enhancer details
+koenecke_enhancers_df <- as.data.frame(koenecke_enhancers)
+
+koenecke_ep_assignments_df <- left_join(koenecke_ep_assigned, koenecke_enhancers_df) %>% 
+  left_join(gene_ids_key)
+## add expression_details
+koenecke_ep_assignments_df <- gene_expr_tpm_mean %>% 
+  tidyr::pivot_wider(names_from = genotype, names_prefix = "mean_tpm_", values_from = mean_tpm) %>% 
+  left_join(koenecke_ep_assignments_df, ., )
+## select columns of interest
+koenecke_ep_assignments_df <- koenecke_ep_assignments_df %>% 
+  dplyr::select(enhancer_id, seqnames, start, end, "differential_k27ac" = class, 
+         "nearest_gene_id" = gene_id, "nearest_gene" = gene_symbol, assignment_type, starts_with("mean_tpm"))
+
+## calculate distance to closest TSS of assigned gene
+promoters_gr_list <- split(promoters_gr, promoters_gr$GENEID)
+get_distance_to_nearest_tss <- function(enhancer_id, nearest_gene_id){
+  e <- koenecke_enhancers[enhancer_id]
+  p <- promoters_gr_list[[nearest_gene_id]]
+  distance <- mcols(distanceToNearest(e, p))$distance
+  return(distance)
+}
+koenecke_ep_assignments_df  <- koenecke_ep_assignments_df  %>% 
+  mutate(distance_to_tss = purrr::map2_dbl(enhancer_id, nearest_gene_id, get_distance_to_nearest_tss))
+
+
+```
+
+### Comparing enhancer activity to their assigned target genes
+
+```{r fig.width=3, fig.height=4}
+p_assigned_genes <- koenecke_ep_assignments_df %>% 
+  tidyr::pivot_longer(starts_with("mean_tpm_"), names_to = "Genotype", 
+                      names_prefix = "mean_tpm_", values_to = "Expression") %>% 
+  dplyr::mutate(Genotype = case_when(Genotype == "tl10b" ~ "Toll10B",
+                                     Genotype == "tlrm910" ~ "Tollrm910",
+                                     TRUE ~ Genotype)) %>%
+  dplyr::mutate(Genotype = factor(Genotype, levels = c("gd7", "Tollrm910", "Toll10B"), ordered = TRUE)) %>% 
+  dplyr::mutate(differential_k27ac = factor(differential_k27ac, levels = c("gd7", "Tollrm910", "Toll10B"), ordered = TRUE)) %>% 
+  ggplot(aes(x = Genotype, y = Expression, fill = Genotype)) +
+  #ggbeeswarm::geom_quasirandom(dodge.width = 0.8, aes(colour = Genotype)) +
+  geom_boxplot(notch = TRUE, outlier.shape = NA) +
+  # scale_y_log10() +
+  scale_fill_manual(values = colour_scheme, guide = "none") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank()) +
+  facet_grid(differential_k27ac ~ .) +
+  labs(x = "Gene expression in", y = "Gene expression (TPM)") +
+  coord_cartesian(ylim = c(0, 300)) +
+  NULL
+p_assigned_genes
+
+
+pdf(file.path(basedir, "figures/figure_1_panels/koenecke_assigned_gene_expr_boxplots.pdf"),
+    width = 2, height = 4)
+p_assigned_genes
+dev.off()
+
+koenecke_ep_assignments_df %>% 
+  tidyr::pivot_longer(starts_with("mean_tpm_"), names_to = "Genotype", 
+                      names_prefix = "mean_tpm_", values_to = "Expression") %>% 
+  dplyr::mutate(Genotype = case_when(Genotype == "tl10b" ~ "Toll10B",
+                                     Genotype == "tlrm910" ~ "Tollrm910",
+                                     TRUE ~ Genotype)) %>%
+  dplyr::mutate(Genotype = factor(Genotype, levels = c("gd7", "Tollrm910", "Toll10B"), ordered = TRUE)) %>% 
+  dplyr::mutate(differential_k27ac = factor(differential_k27ac, levels = c("gd7", "Toll10B"), 
+                                            ordered = TRUE)) %>% 
+  group_by(differential_k27ac) %>%
+  summarise(p_gd7_Tollrm910 = format.pval(wilcox.test(Expression[Genotype == "gd7"], 
+                                          Expression[Genotype == "Tollrm910"])$p.value, digits = 3),
+            p_gd7_Toll10B = format.pval(wilcox.test(Expression[Genotype == "gd7"], 
+                                        Expression[Genotype == "Toll10B"])$p.value, digits = 3),
+            p_Tollrm910_Toll10B = format.pval(wilcox.test(Expression[Genotype == "Toll10B"], 
+                                              Expression[Genotype == "Tollrm910"])$p.value, digits = 3)) %>% 
+  knitr::kable()
+
+```
+
+### Comparing enhancers to TADs and GRBs
+
+```{r, fig.width=10}
+koenecke_enhancers$boundary_tad_overlap <- ifelse(countOverlaps(koenecke_enhancers, boundary_tads) > 0, "yes", "no")
+koenecke_enhancers$grb_overlap <- ifelse(countOverlaps(koenecke_enhancers, grbs) > 0, "yes", "no")
+```
+
+```{r}
+boundary_tads$tad_id <- as.character(boundary_tads)
+boundary_tads$has_enh <- countOverlaps(boundary_tads, koenecke_enhancers) > 0
+boundary_tads$num_genes <- countOverlaps(boundary_tads, promoters_gr)
+boundary_tads$genes_per_kb <- boundary_tads$num_genes / (width(boundary_tads)/1000)
+boundary_tads$overlaps_grb <- countOverlaps(boundary_tads, grbs) > 0
+
+boundary_tads_df <- as.data.frame(boundary_tads) %>% 
+  dplyr::mutate(has_enh = ifelse(has_enh, "yes", "no"),
+                overlaps_grb = ifelse(overlaps_grb, "yes", "no"))
+
+size_p <- wilcox.test(width(boundary_tads) ~ boundary_tads$has_enh)
+promoters_p <- wilcox.test(boundary_tads$num_genes ~ boundary_tads$has_enh)
+promoter_density_p <- wilcox.test(boundary_tads$genes_per_kb ~ boundary_tads$has_enh)
+
+
+p_domain_size <- ggplot(boundary_tads_df, aes(colour = has_enh, x = width)) +
+  geom_line(stat = "ecdf") +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_continuous(labels = scales::unit_format(unit = "", scale = 1e-3)) +
+  coord_cartesian(xlim = c(0, 3e5)) +
+  scale_color_manual(values = c("darkgrey", "black")) +
+  labs(x = "Domain size (kb)", y = "% of domains", colour = "Contains\nenhancers") +
+  annotate(geom="text", x = 0, y = 1, 
+            label = paste0("p = ", format.pval(size_p$p.value, 2)), hjust = 0)
+p_domain_size
+
+grbs_pval <- chisq.test(table(boundary_tads$has_enh, boundary_tads$overlaps_grb))
+
+p_grbs <- ggplot(boundary_tads_df, aes(x = has_enh, fill = overlaps_grb)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) + 
+  theme_bw(base_size = 12) +
+  scale_fill_manual("Overlaps GRB", values = c("yes" = "black", "no" = "grey")) +
+  labs(x = "Contains enhancers", y = "% of domains") +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+  annotate(geom="text", x = 1.5, y = 1.05, 
+            label = paste0("p = ", format.pval(grbs_pval$p.value, 2)))
+p_grbs  
+
+```
+
+```{r fig.width = 2, fig.height = 3}
+p_gene_density <- ggplot(boundary_tads_df, aes(x = has_enh, y = genes_per_kb)) +
+  geom_boxplot(notch = TRUE) +
+  theme_bw(base_size = 12) +
+  theme(panel.grid.minor = element_blank()) +
+  labs(x = "Contains enhancers", y = "Genes per kb") +
+  annotate(geom="text", x = 1.5, y = 2.2, 
+            label = paste0("p = ", format.pval(promoter_density_p$p.value, 2)))
+p_gene_density
+
+```
+
+```{r, fig.width=7, fig.height=3}
+pdf(file.path(basedir, "figures/figure_1_panels/koenecke_domain_size_gene_density_grbs.pdf"),
+    width = 7, height = 3)
+cowplot::plot_grid(p_domain_size, p_gene_density, p_grbs, nrow = 1, 
+                   align = "h", axis = "tb", rel_widths = c(1.5, 1, 1))
+dev.off()
+```
+
+`r sum(boundary_tads$has_enh)` domains (out of a total of `r length(boundary_tads)`contain one or more enhancers. The mean size of domains containing an  enhancer is `r mean(width(boundary_tads[boundary_tads$has_enh]))/1000` kb, while the mean size of domains without an enhancer is `r mean(width(boundary_tads[!boundary_tads$has_enh]))/1000` kb. This is a significant difference with p = `r size_p$p.value`.
+
+The mean number of promoters inside domains containing an  enhancer is `r mean(boundary_tads$num_genes[boundary_tads$has_enh])`, while the mean number of promoters inside domains without an enhancer is `r mean(boundary_tads$num_genes[!boundary_tads$has_enh])`. This is a significant difference with p = `r promoters_p$p.value`.
+
+The median number of promoters per kb inside domains containing an  enhancer is `r median(boundary_tads$genes_per_kb[boundary_tads$has_enh])`, while the median number of promoters per kb inside domains without an enhancer is `r median(boundary_tads$genes_per_kb[!boundary_tads$has_enh])`. The wilcox test p value for this is p = `r promoter_density_p$p.value`
+
+
+## Session info
+
+This report was generated at `r format(Sys.time(), "%X, %a %b %d %Y")`. 
+
+```{r}
+devtools::session_info()
+```
+

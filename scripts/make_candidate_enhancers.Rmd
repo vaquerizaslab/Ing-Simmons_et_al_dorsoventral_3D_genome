@@ -1,0 +1,519 @@
+---
+title: "ChIP-seq analysis of DV mutants"
+author: "Liz Ing-Simmons"
+date: "05/03/2020"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r global_options, echo=FALSE}
+knitr::opts_chunk$set(fig.width=6, fig.height=4, dpi = 300, out.width = "60%",
+             warning=FALSE, message=FALSE, error= FALSE, dev = c("png", "pdf"))
+pdf.options(useDingbats = FALSE)
+options(stringsAsFactors = FALSE)
+
+seed <- 20200116
+
+colour_scheme <- c("PCNA-GFP" = "black", "w1118" = "grey",
+                   gd7 = "#648FFF", Tollrm910 = "#DC267F", Toll10B = "#FFB000")
+basedir <- here::here()
+```
+
+```{r load_packages, cache = FALSE}
+# library("conflicted")
+library("GenomicRanges")
+library("GenomicFeatures")
+library("dplyr")
+library("rtracklayer")
+library("ggplot2")
+library("BSgenome.Dmelanogaster.UCSC.dm6")
+Dmel <- Dmelanogaster
+seqlevelsStyle(Dmel) <- "Ensembl"
+
+dm3_to_dm6_chain <- import.chain(file.path(basedir, "../external_data/dm3ToDm6.over.chain"))
+
+```
+
+```{r functions}
+
+calc_jaccard <- function(n1, n2, list){
+  union_size <- sum(width(GenomicRanges::union(list[[as.character(n1)]],
+                                               list[[as.character(n2)]], 
+                                               ignore.strand = TRUE)))
+  intersect_size <- sum(width(GenomicRanges::intersect(list[[as.character(n1)]],
+                                                       list[[as.character(n2)]], 
+                                                       ignore.strand = TRUE)))
+  return(intersect_size / union_size)
+}
+
+n_overlap <- function(n1, n2, list){
+  length(subsetByOverlaps(list[[as.character(n1)]], list[[as.character(n2)]], 
+                          ignore.strand = TRUE))
+}
+
+calc_jaccard2 <- function(n1, n2, list1, list2){
+  union_size <- sum(width(GenomicRanges::union(list1[[as.character(n1)]],
+                                               list2[[as.character(n2)]], 
+                                               ignore.strand = TRUE)))
+  intersect_size <- sum(width(GenomicRanges::intersect(list1[[as.character(n1)]],
+                                                       list2[[as.character(n2)]], 
+                                                       ignore.strand = TRUE)))
+  return(intersect_size / union_size)
+}
+
+n_overlap2 <- function(n1, n2, list1, list2){
+  length(subsetByOverlaps(list1[[as.character(n1)]],
+                          list2[[as.character(n2)]], 
+                          ignore.strand = TRUE))
+}
+
+drop_windows <- function(windows, genome){
+  drop_idx <- end(windows) > seqlengths(genome)[as.character(seqnames(windows))] | start(windows) <= 0
+  message("Dropping ", sum(drop_idx), " ranges")
+  return(windows[!drop_idx])
+}
+
+
+```
+
+The aim of this analysis is to compare ChIP-seq peaks, differential ChIP-seq peaks, and known enhancers.
+
+# Import data
+
+```{r}
+blacklist <- import(file.path(basedir, "../external_data/blacklist/Blacklist/lists/dm6-blacklist.v2.bed"))
+chrs_to_use <- c("2L", "2R", "3L", "3R", "4", "X", "Y")
+```
+
+
+## Genes
+
+```{r, cache=TRUE}
+gene_ids_key <- rtracklayer::import.gff(file.path(basedir, "../external_data/flybase/dmel-all-r6.30.gtf.gz")) %>% 
+  as.data.frame() %>%
+  dplyr::filter(type == "gene") %>%
+  dplyr::select(gene_id, gene_symbol)
+
+txdb <- makeTxDbFromGFF(file.path(basedir, "../external_data/flybase/dmel-all-r6.30.gtf.gz"))
+transcripts_gr <- transcripts(txdb, columns = c("TXNAME", "GENEID"))
+mcols(transcripts_gr)$GENEID <- unlist(mcols(transcripts_gr)$GENEID)
+
+mcols(transcripts_gr) <- left_join(as.data.frame(mcols(transcripts_gr)), 
+                                   gene_ids_key, by = c("GENEID" = "gene_id"))
+
+transcripts_gr <- transcripts_gr[seqnames(transcripts_gr) %in% chrs_to_use]
+
+# potential transcripts to exclude
+# sapply(transcripts_gr$gene_symbol[grepl(":", transcripts_gr$gene_symbol)], function(str){
+#   strsplit(str, ":", fixed = TRUE)[[1]][1]
+# }) %>%  table()
+
+tx_types_to_exclude <- c("tRNA:", "rRNA:", "rRNA-Psi:", "asRNA:", "snoRNA:", "scaRNA:", "snRNA:")
+
+transcripts_gr <- transcripts_gr[!grepl(pattern = paste(tx_types_to_exclude, collapse = "|"), 
+                                        transcripts_gr$gene_symbol)]
+
+promoters_gr <- promoters(transcripts_gr, upstream = 100, downstream = 100)
+```
+
+```{r read_chipseq, cache=TRUE, eval=FALSE}
+chipseq_bw <- list.files(file.path(basedir, "../external_data/koenecke_2016_2017/chipseq_aligned/"),
+                         pattern ="_sorted_filtered_merged_canonical_chrs.bw$", full.names = TRUE) %>% 
+  setNames(gsub("_sorted_filtered_merged_canonical_chrs.bw", "", basename(.)))
+
+chipseq_bw2 <- list.files(file.path(basedir, "../external_data/extra_chip-seq/chipseq_aligned/"),
+                          pattern ="_sorted_filtered_merged_canonical_chrs.bw$", full.names = TRUE) %>% 
+   setNames(gsub("_sorted_filtered_merged_canonical_chrs.bw", "", basename(.)))
+
+chipseq_bw <- c(chipseq_bw, chipseq_bw2)
+
+chipseq_df <- tibble::tibble(file = basename(chipseq_bw), name = names(chipseq_bw)) %>% 
+  tidyr::separate(name, into = c("factor", "genotype"), sep = "_", remove = FALSE)
+
+chipseq_df %>% 
+  dplyr::select(factor, genotype) %>% 
+  knitr::kable()
+
+files_to_use <- chipseq_df %>% 
+  dplyr::filter(factor %in% c("H3K27ac", "H3K27me3")) %>% 
+  arrange(factor) %>% 
+  pull(name)
+names(chipseq_bw)
+
+chipseq_cov <- lapply(chipseq_bw[files_to_use], function(f) {
+  coverage(import.bw(f), weight = "score")})
+
+```
+
+## ChIP-seq peaks and differential peaks
+
+```{r}
+## ChIP-seq MACS2 peaks
+koenecke_peaks <- list.files(file.path(basedir, "../external_data/koenecke_2016_2017/chipseq_peaks/"),
+                        pattern = "H3K27.*filtered.narrowPeak", full.names = TRUE)
+tollrm910_peaks <- list.files(file.path(basedir, "../external_data/extra_chip-seq/chipseq_peaks/"),
+                        pattern = "H3K27.*filtered.narrowPeak", full.names = TRUE)
+
+peak_files <- c(koenecke_peaks, tollrm910_peaks)
+names(peak_files) <- gsub("_peaks_filtered.narrowPeak", "", basename(peak_files))
+
+chipseq_peaks <- lapply(peak_files, function(f){
+    peaks <- read.table(f, col.names = c("chr", "start", "end", "name", "score", "strand",
+                              "fc", "pval", "qval", "summit"))
+    makeGRangesFromDataFrame(peaks, keep.extra.columns = TRUE)
+})
+
+## Koenecke et al enhancers
+koenecke_distal_enhancers_dm3 <- readxl::read_excel(
+  file.path(basedir, "../external_data/koenecke_2016_2017/enhancers/",
+            "distal_enhancers_dm3_13059_2016_1057_MOESM4_ESM.xlsx"), sheet = 2)
+
+koenecke_distal_enhancers_dm6_list <- koenecke_distal_enhancers_dm3 %>% 
+  as.data.frame() %>% 
+  makeGRangesFromDataFrame(keep.extra.columns = TRUE) %>%
+  liftOver(dm3_to_dm6_chain)
+
+koenecke_distal_enhancers_dm6 <- do.call("c", unname(koenecke_distal_enhancers_dm6_list[lengths(koenecke_distal_enhancers_dm6_list) == 1]))
+seqlevelsStyle(koenecke_distal_enhancers_dm6) <- "Ensembl"
+koenecke_enhancers_list <- split(koenecke_distal_enhancers_dm6, 
+                                 koenecke_distal_enhancers_dm6$differential_k27ac)
+names(koenecke_enhancers_list) <- gsub("Higher in ", "Koenecke et al. ", names(koenecke_enhancers_list))
+
+## Literature enhancers from Koenecke et al
+literature_enhancers_dm3 <- readxl::read_excel(file.path(basedir,
+  "../external_data/koenecke_2016_2017/enhancers/literature_enhancers_dm3_13059_2016_1057_MOESM2_ESM.xlsx"), sheet = 1)
+literature_enhancers_dm6_list <- literature_enhancers_dm3 %>% 
+  as.data.frame() %>% 
+  makeGRangesFromDataFrame(keep.extra.columns = TRUE) %>%
+  liftOver(dm3_to_dm6_chain)
+
+literature_enhancers_dm6 <- do.call("c", unname(literature_enhancers_dm6_list[lengths(literature_enhancers_dm6_list) == 1]))
+seqlevelsStyle(literature_enhancers_dm6) <- "Ensembl"
+literature_enhancers_list <- split(literature_enhancers_dm6, literature_enhancers_dm6$enhancer_type)
+names(literature_enhancers_list) <- paste("Literature", names(literature_enhancers_list))
+
+## My differential H3K27ac regions
+differential_h3k27ac_peak_files <- list.files(file.path(basedir, "data/differential_chipseq/"), 
+                                              "h3k27ac", full.names = TRUE)
+names(differential_h3k27ac_peak_files) <- gsub(".bed", "", basename(differential_h3k27ac_peak_files))
+differential_h3k27ac_peaks <- lapply(differential_h3k27ac_peak_files, function(f){
+  peaks <- read.table(f, col.names = c("chr", "start", "end", "name", "score", "strand"))
+  makeGRangesFromDataFrame(peaks, keep.extra.columns = TRUE)
+})
+
+
+```
+
+
+# Inspecting ChIP-seq peak calls
+
+```{r peak_counts}
+peak_data <- lapply(chipseq_peaks, as.data.frame, stringsAsFactors = FALSE) %>% 
+  bind_rows(.id = "sample") %>%
+  tidyr::separate(sample, into = c("factor", "genotype", "replicate"), sep = "_")
+
+peak_counts <- peak_data %>% 
+  group_by(factor, genotype, replicate) %>% 
+  tally()
+
+ggplot(peak_counts, aes(x = genotype, y = replicate, fill = n, label = n)) +
+    geom_tile() +
+    geom_text() +
+    scale_fill_gradient(low = "white", high = "steelblue") +
+    scale_x_discrete(position = "top") +
+    facet_wrap(~factor)
+
+ggplot(peak_data, aes(x = genotype, fill = replicate, y = width)) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
+  # geom_boxplot(width = 0.5, position = position_dodge(width = 0.9)) +
+  scale_y_log10(limits = c(100, 30000)) +
+  theme_bw() +
+  facet_wrap(~factor)
+
+
+jaccard_list <- c(chipseq_peaks, promoters = promoters_gr)
+sample_names <- sort(names(jaccard_list))
+
+chipseq_peaks_jaccard <- data.frame(n1 = factor(rep(sample_names, length(sample_names)), 
+                                       levels = sample_names),
+                           n2 = factor(rep(sample_names, each = length(sample_names)), 
+                                       levels = sample_names)) %>% 
+  mutate(jaccard = purrr::map2_dbl(n1, n2, calc_jaccard, jaccard_list))
+
+ggplot(chipseq_peaks_jaccard, aes(x = n1 , y = n2, fill = jaccard)) +
+  geom_tile() +
+  geom_text(aes(label = signif(jaccard, 2))) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme_bw(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(x = "", y = "")
+
+```
+
+## Using only peaks that overlap between replicates
+
+```{r}
+chip_names <- unique(paste(peak_counts$factor, peak_counts$genotype, sep = "_"))
+chipseq_peaks_intersect_list <- lapply(chip_names, function(chip_name){
+  tmp <- chipseq_peaks[grep(chip_name, names(chipseq_peaks))]
+  ol <- GenomicRanges::intersect(tmp[[1]], tmp[[2]])
+  return(ol)
+}) %>% setNames(chip_names)
+
+
+peak_data <- lapply(chipseq_peaks_intersect_list, as.data.frame, stringsAsFactors = FALSE) %>% 
+  bind_rows(.id = "sample") %>%
+  tidyr::separate(sample, into = c("factor", "genotype"), sep = "_")
+
+peak_counts <- peak_data %>% 
+  group_by(factor, genotype) %>% 
+  tally()
+
+ggplot(peak_counts, aes(x = genotype, y = factor, fill = n, label = n)) +
+    geom_tile() +
+    geom_text() +
+    scale_fill_gradient(low = "white", high = "steelblue") +
+    scale_x_discrete(position = "top")
+
+ggplot(peak_data, aes(x = genotype, y = width)) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
+  # geom_boxplot(width = 0.5, position = position_dodge(width = 0.9)) +
+  scale_y_log10(limits = c(100, 30000)) +
+  theme_bw() +
+  facet_wrap(~factor)
+
+# jaccard index calculations
+jaccard_list <- c(chipseq_peaks_intersect_list, promoters = promoters_gr)
+sample_names <- sort(names(jaccard_list))
+
+chipseq_peaks_intersect_jaccard <- data.frame(n1 = factor(rep(sample_names, length(sample_names)), 
+                                       levels = sample_names),
+                           n2 = factor(rep(sample_names, each = length(sample_names)), 
+                                       levels = sample_names)) %>% 
+  mutate(jaccard = purrr::map2_dbl(n1, n2, calc_jaccard, jaccard_list))
+
+ggplot(chipseq_peaks_intersect_jaccard, aes(x = n1 , y = n2, fill = jaccard)) +
+  geom_tile() +
+  geom_text(aes(label = signif(jaccard, 2))) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme_bw(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(x = "", y = "")
+```
+
+
+# Inspecting differential H3K27ac peaks
+
+Differential peaks are named as follows: e.g. gd7-Tollrm910_up are peaks that are up in Tollrm910.
+
+So, we would expect overlaps between the following sets of peaks:
+
+h3k27ac_gd7-tl10b_down & h3k27ac_gd7-Tollrm910_down - peaks higher in gd7 than others
+h3k27ac_gd7-tl10b_up & h3k27ac_tl10b-Tollrm910_down - peaks higher in Toll10B than others
+h3k27ac_gd7-Tollrm910_up & h3k27ac_tl10b-Tollrm910_up - peaks higher in Tollrm9/10 than others
+
+```{r}
+peak_data <- lapply(differential_h3k27ac_peaks, as.data.frame, stringsAsFactors = FALSE) %>% 
+  bind_rows(.id = "sample") %>%
+  tidyr::separate(sample, into = c("factor", "genotype", "direction"), sep = "_")
+
+peak_counts <- peak_data %>% 
+  group_by(factor, genotype, direction) %>% 
+  tally()
+
+ggplot(peak_counts, aes(x = genotype, y = direction, fill = n, label = n)) +
+    geom_tile() +
+    geom_text() +
+    scale_fill_gradient(low = "white", high = "steelblue") +
+    scale_x_discrete(position = "top")
+
+ggplot(peak_data, aes(x = genotype, y = width)) +
+  geom_violin(draw_quantiles = c(0.25, 0.5, 0.75)) +
+  # geom_boxplot(width = 0.5, position = position_dodge(width = 0.9)) +
+  scale_y_log10(limits = c(100, 30000)) +
+  theme_bw() +
+  facet_wrap(~direction)
+
+# jaccard index calculations
+jaccard_list <- c(differential_h3k27ac_peaks, promoters = promoters_gr)
+sample_names <- sort(names(jaccard_list))
+
+differential_h3k27ac_peaks_jaccard <- data.frame(n1 = factor(rep(sample_names, length(sample_names)), 
+                                       levels = sample_names),
+                           n2 = factor(rep(sample_names, each = length(sample_names)), 
+                                       levels = sample_names)) %>% 
+  mutate(jaccard = purrr::map2_dbl(n1, n2, calc_jaccard, jaccard_list))
+
+ggplot(differential_h3k27ac_peaks_jaccard, aes(x = n1 , y = n2, fill = jaccard)) +
+  geom_tile() +
+  geom_text(aes(label = signif(jaccard, 2))) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme_bw(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(x = "", y = "")
+```
+
+I see the following patterns:
+
+- peaks that are higher in gd7 than Toll10B overlap with peaks that are higher in gd7 than Tollrm9/10, but have even higher overlap with peaks that are higher in Tollrm9/10 than Toll10B, suggesting a set of peaks shared between gd7 and Tollrm9/10
+- peaks that are higher in Toll10B than gd7 overlap with peaks that are higher in Tollrm9/10 than gd7, but also with peaks that are higher in Toll10B than in Tollrm9/10 - again, this suggests that a subset of peaks are shared between Toll10B and Tollrm9/10
+- other overlaps support this pattern!
+- no group has high overlap with promoters
+
+```{r}
+sapply(differential_h3k27ac_peaks, function(gr){
+  length(subsetByOverlaps(gr, promoters_gr))/length(gr)
+})
+
+differential_h3k27ac_peaks <- lapply(differential_h3k27ac_peaks, function(gr){
+  ol <- findOverlaps(gr, promoters_gr)
+  gr[-queryHits(ol)]
+})
+lengths(differential_h3k27ac_peaks)
+
+```
+
+~30-50% of peaks are within 100bp of a TSS. I'll remove these.
+
+
+```{r}
+# jaccard index calculations
+jaccard_list <- c(literature_enhancers_list, differential_h3k27ac_peaks)
+sample_names <- names(jaccard_list)
+
+differential_h3k27ac_peaks_jaccard <- data.frame(n1 = factor(rep(sample_names, length(sample_names)), 
+                                       levels = sample_names),
+                           n2 = factor(rep(sample_names, each = length(sample_names)), 
+                                       levels = sample_names)) %>% 
+  mutate(jaccard = purrr::map2_dbl(n1, n2, n_overlap, jaccard_list))
+
+ggplot(differential_h3k27ac_peaks_jaccard, aes(x = n1 , y = n2, fill = jaccard)) +
+  geom_tile() +
+  geom_text(aes(label = signif(jaccard, 2))) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme_bw(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(x = "", y = "")
+```
+
+```{r}
+testlist <- c(literature_enhancers_list, koenecke_enhancers_list)
+
+e_jaccard <- data.frame(n2 = factor(rep(names(differential_h3k27ac_peaks), length(testlist))),
+                           n1 = factor(rep(names(testlist), each = length(differential_h3k27ac_peaks)))) %>% 
+  mutate(jaccard = purrr::map2_dbl(n1, n2, calc_jaccard2, 
+                                   list1 = testlist, list2 = differential_h3k27ac_peaks),
+         n_overlap = purrr::map2_dbl(n1, n2, n_overlap2, 
+                                   list1 = testlist, list2 = differential_h3k27ac_peaks))
+
+# ggplot(e_jaccard, aes(x = n1 , y = n2, fill = jaccard)) +
+#   geom_tile() +
+#   geom_text(aes(label = signif(jaccard, 2))) +
+#   scale_fill_gradient(low = "white", high = "steelblue") +
+#   theme_bw(base_size = 16) +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+#   labs(x = "", y = "")
+
+ggplot(e_jaccard, aes(x = n1 , y = n2, fill = n_overlap)) +
+  geom_tile() +
+  geom_text(aes(label = n_overlap)) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme_bw(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(x = "", y = "")
+
+
+testlist <- lapply(testlist, function(test_gr){
+  mcols(test_gr) <- cbind(mcols(test_gr),
+                          as.data.frame(
+    sapply(differential_h3k27ac_peaks, function(gr){
+      countOverlaps(test_gr, gr) > 0 })))
+  return(test_gr)
+  })
+
+```
+
+Of the `r length(testlist[["Literature ME"]])` mesoderm enhancers identified from the literature by Koenecke et al, `r sum(mcols(testlist[["Literature ME"]])[, "h3k27ac_gd7-tl10b_down"])` overlap peaks that are significantly up in Toll10B compared to gd7. 
+
+Of the `r length(testlist[["Literature DEE"]])` dorsal ectoderm enhancers identified from the literature by Koenecke et al, `r sum(mcols(testlist[["Literature DEE"]])[, "h3k27ac_gd7-tl10b_up"])` overlap peaks that are significantly up in gd7 compared to Toll10B.
+
+Of the `r length(testlist[["Koenecke et al. Toll10b"]])` Toll10B enhancers identified by Koenecke et al, `r sum(mcols(testlist[["Koenecke et al. Toll10b"]])[, "h3k27ac_gd7-tl10b_down"])` overlap peaks that are significantly up in Toll10B compared to gd7. `r sum(mcols(testlist[["Koenecke et al. Toll10b"]])[, "h3k27ac_tl10b-Tollrm910_up"])` overlap peaks that are significantly up in Toll10B compared to Tollrm9/10.
+
+Of the `r length(testlist[["Koenecke et al. gd7"]])` dorsal ectoderm enhancers identified from the literature by Koenecke et al, `r sum(mcols(testlist[["Koenecke et al. gd7"]])[, "h3k27ac_gd7-tl10b_up"])` overlap peaks that are significantly up in gd7 compared to Toll10B. `r sum(mcols(testlist[["Koenecke et al. gd7"]])[, "h3k27ac_gd7-Tollrm910_up"])` overlap peaks that are significantly up in gd7 compared to Tollrm9/10.
+
+
+## Selecting a stringent set of candidate enhancers
+
+To select a stringent set of candidate enhancers, I'll take the subset of regions which are significantly enriched for H3K27ac in one genotype compared to *both* others. 
+
+```{r}
+gd7_only <- BiocGenerics::intersect(differential_h3k27ac_peaks$`h3k27ac_gd7-tl10b_up`,
+                      differential_h3k27ac_peaks$`h3k27ac_gd7-Tollrm910_up`)
+tollrm910_only <- BiocGenerics::intersect(differential_h3k27ac_peaks$`h3k27ac_gd7-Tollrm910_down`,
+                      differential_h3k27ac_peaks$`h3k27ac_tl10b-Tollrm910_down`)
+toll10B_only <- BiocGenerics::intersect(differential_h3k27ac_peaks$`h3k27ac_gd7-tl10b_down`,
+                      differential_h3k27ac_peaks$`h3k27ac_tl10b-Tollrm910_up`)
+
+stringent_e_list <- list(gd7 = gd7_only, tollrm910 = tollrm910_only, toll10B = toll10B_only)
+testlist <- c(literature_enhancers_list, koenecke_enhancers_list)
+
+e_jaccard <- data.frame(n2 = factor(rep(names(stringent_e_list), length(testlist))),
+                           n1 = factor(rep(names(testlist), each = length(stringent_e_list)))) %>% 
+  mutate(jaccard = purrr::map2_dbl(n1, n2, calc_jaccard2, 
+                                   list1 = testlist, list2 = stringent_e_list),
+         n_overlap = purrr::map2_dbl(n1, n2, n_overlap2, 
+                                   list1 = testlist, list2 = stringent_e_list))
+
+# ggplot(e_jaccard, aes(x = n1 , y = n2, fill = jaccard)) +
+#   geom_tile() +
+#   geom_text(aes(label = signif(jaccard, 2))) +
+#   scale_fill_gradient(low = "white", high = "steelblue") +
+#   theme_bw(base_size = 16) +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+#   labs(x = "", y = "")
+
+ggplot(e_jaccard, aes(x = n1 , y = n2, fill = n_overlap)) +
+  geom_tile() +
+  geom_text(aes(label = n_overlap)) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme_bw(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(x = "", y = "")
+
+testlist <- lapply(testlist, function(test_gr){
+  mcols(test_gr) <- cbind(mcols(test_gr),
+                          as.data.frame(
+    sapply(stringent_e_list, function(gr){
+      countOverlaps(test_gr, gr) > 0 })))
+  return(test_gr)
+  })
+```
+
+Of the `r length(testlist[["Literature ME"]])` mesoderm enhancers identified from the literature by Koenecke et al, `r sum(mcols(testlist[["Literature ME"]])[, "toll10B"])` overlap Toll10B stringent enhancers. `r sum(mcols(testlist[["Literature ME"]])[, "tollrm910"])` overlap Tollrm9/10 stringent enhancers. 
+
+Of the `r length(testlist[["Literature DEE"]])` dorsal ectoderm enhancers identified from the literature by Koenecke et al, `r sum(mcols(testlist[["Literature DEE"]])[, "gd7"])` overlap gd7 stringent enhancers.  `r sum(mcols(testlist[["Literature DEE"]])[, "tollrm910"])` overlap Tollrm9/10 stringent enhancers. 
+
+Of the `r length(testlist[["Koenecke et al. Toll10b"]])` Toll10B enhancers identified by Koenecke et al, `r sum(mcols(testlist[["Koenecke et al. Toll10b"]])[, "toll10B"])` overlap Toll10B stringent enhancers.  `r sum(mcols(testlist[["Koenecke et al. Toll10b"]])[, "tollrm910"])` overlap Tollrm9/10 stringent enhancers. 
+
+Of the `r length(testlist[["Koenecke et al. gd7"]])` dorsal ectoderm enhancers identified from the literature by Koenecke et al, `r sum(mcols(testlist[["Koenecke et al. gd7"]])[, "gd7"])` overlap gd7 stringent enhancers.. `r sum(mcols(testlist[["Koenecke et al. gd7"]])[, "tollrm910"])` overlap Tollrm9/10 stringent enhancers. 
+
+### Exporting stringent enhancers
+
+```{r, cache=TRUE}
+export.bed(gd7_only, con = file.path(basedir, "data/supplementary_tables/gd7_candidate_enhancers.bed"))
+export.bed(tollrm910_only, con = file.path(basedir, "data/supplementary_tables/Tollrm910_candidate_enhancers.bed"))
+export.bed(toll10B_only, con = file.path(basedir, "data/supplementary_tables/Toll10B_candidate_enhancers.bed"))
+
+```
+
+
+# Session info
+
+This report was generated at `r format(Sys.time(), "%X, %a %b %d %Y")`. 
+
+```{r}
+devtools::session_info()
+```
