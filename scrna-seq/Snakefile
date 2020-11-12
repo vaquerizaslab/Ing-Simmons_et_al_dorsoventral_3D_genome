@@ -1,0 +1,213 @@
+# import pandas as pd
+# import re
+
+# configfile: "config.yaml"
+
+# samples = pd.read_csv(config["samples"], sep = '\t').set_index("sample_name", drop=False)
+# FASTQ = [ re.sub(".fastq.gz", "", f) for f in samples['read1'].tolist() + samples['read2'].tolist() ]
+# SAMPLE_NAMES = samples['sample_name'].tolist()
+
+SAMPLE_NAMES = ["PCNA-GFP_Rep1"]
+FASTQ_pilot = expand(expand("{sample_name}_{sample}_{{lane}}_{{read}}_001.fastq.gz", zip,
+	sample_name = ["PCNA-GFP_Rep1"], 
+	sample = ["S1"]),
+	lane = ["L001", "L002", "L003", "L004"], 
+	read = ["R1", "R2"])
+FASTQ2 = expand(expand("{sample_name}_{sample}_{{lane}}_{{read}}_001.fastq.gz", zip,
+	sample_name = ["w1118_Rep1", "gd7_Rep1", "Tollrm910_Rep1", "Toll10B_Rep1"], 
+	sample = ["S1", "S2", "S3", "S4"]),
+	lane = ["L001", "L002", "L003", "L004"], 
+	read = ["R1", "R2"])
+
+
+localrules: all, get_genome, get_genes
+
+rule all:
+	input:
+		"multiqc_report.html",
+		# expand("data/counts/{sample_name}/outs/web_summary.html",
+		# 	sample_name = ["PCNA-GFP_Rep1", "w1118_Rep1", "gd7_Rep1", "Tollrm910_Rep1", "Toll10B_Rep1"])
+		expand("rnaseq_quantifications/{sample_name}/quant.sf",
+			sample_name = ["PCNA-GFP_Rep1", "w1118_Rep1", "gd7_Rep1", "Tollrm910_Rep1", "Toll10B_Rep1"])
+
+## FASTQ and QC
+
+rule mkfastq:
+	output: 
+		"data/H27M5AFX2/outs/fastq_path/H27M5AFX2/PCNA-GFP_Rep1/"
+	threads: 8
+	shell:
+		"cd data/ && "
+		"cellranger mkfastq --run /home/lingsim/miseq/200113_NB501962_0191_AH27M5AFX2/ --csv=samplesheet_pilot.csv "
+		"--jobmode=local --localcores={threads} --localmem=57"
+
+rule mvfastq:
+	input:
+		"data/H27M5AFX2/outs/fastq_path/H27M5AFX2/PCNA-GFP_Rep1/"
+	output:
+		expand("data/fastq/{x}", x = FASTQ_pilot)
+	shell:
+		"cd data/fastq/ && ln -s ../H27M5AFX2/outs/fastq_path/H27M5AFX2/*/*.fastq.gz ."
+
+rule mkfastq2:
+	output: 
+		expand("data/H22TWBGXF/outs/fastq_path/H22TWBGXF/{sample_name}/",
+			sample_name = ["w1118_Rep1", "gd7_Rep1", "Tollrm910_Rep1", "Toll10B_Rep1"])
+	threads: 8
+	shell:
+		"cd data/ && "
+		"cellranger mkfastq --run /home/lingsim/miseq/200208_NB501962_0211_AH22TWBGXF/ --csv=samplesheet.csv "
+		"--jobmode=local --localcores={threads} --localmem=57 "
+
+rule mvfastq2:
+	input:
+		expand("data/H22TWBGXF/outs/fastq_path/H22TWBGXF/{sample_name}/",
+			sample_name = ["w1118_Rep1", "gd7_Rep1", "Tollrm910_Rep1", "Toll10B_Rep1"])
+	output:
+		expand("data/fastq/{x}", x = FASTQ2)
+	shell:
+		"cd data/fastq/ && ln -s ../H22TWBGXF/outs/fastq_path/H22TWBGXF/*/*.fastq.gz ."
+
+
+rule fastqc:
+	input:
+		"data/fastq/{sample_name}_{sample}_{lane}_{read}_001.fastq.gz"
+	output:
+		"data/fastqc/{sample_name}_{sample}_{lane}_{read}_001_fastqc.html",
+		"data/fastqc/{sample_name}_{sample}_{lane}_{read}_001_fastqc.zip"
+	shell:
+		"fastqc -o data/fastqc/ -f fastq {input}"
+
+rule multiqc:
+	input:
+		expand(expand("data/fastqc/{sample_name}_{sample}_{{lane}}_{{read}}_001_fastqc.html", zip,
+			sample_name = ["PCNA-GFP_Rep1", "w1118_Rep1", "gd7_Rep1", "Tollrm910_Rep1", "Toll10B_Rep1"], 
+			sample = ["S1", "S1", "S2", "S3", "S4"]),
+			lane = ["L001", "L002", "L003", "L004"],
+			read = ["R1", "R2"])
+	output:
+		"multiqc_report.html"
+	shell:
+		"multiqc ."
+
+## Make cellranger reference 
+
+rule get_genome:
+	output: 
+		"data/ref_data/Drosophila_melanogaster.BDGP6.22.dna.toplevel.fa"
+	shell:
+		"cd data/ref_data/ && "
+		"wget ftp://ftp.ensembl.org/pub/release-98/fasta/drosophila_melanogaster/dna/Drosophila_melanogaster.BDGP6.22.dna.toplevel.fa.gz && "
+		"gunzip Drosophila_melanogaster.BDGP6.22.dna.toplevel.fa.gz"
+
+rule get_genes:
+	output:
+		"data/ref_data/Drosophila_melanogaster.BDGP6.22.98.gtf"
+	shell: 
+		"cd data/ref_data/ && "
+		"wget ftp://ftp.ensembl.org/pub/release-98/gtf/drosophila_melanogaster/Drosophila_melanogaster.BDGP6.22.98.gtf.gz && "
+		"gunzip Drosophila_melanogaster.BDGP6.22.98.gtf.gz"
+
+rule filter_gtf:
+	input:  
+		"data/ref_data/Drosophila_melanogaster.BDGP6.22.98.gtf"
+	output:
+		"data/ref_data/Drosophila_melanogaster.BDGP6.22.98.filtered.gtf"
+	shell:
+		""" 
+		cellranger mkgtf {input} {output} \
+                 --attribute=gene_biotype:protein_coding \
+                 --attribute=gene_biotype:lincRNA \
+                 --attribute=gene_biotype:antisense
+    	"""
+
+rule mkref:
+	input:
+		gtf = "data/ref_data/Drosophila_melanogaster.BDGP6.22.98.filtered.gtf",
+		fa = "data/ref_data/Drosophila_melanogaster.BDGP6.22.dna.toplevel.fa"
+	output:
+		directory("data/ref_data/dm6")
+	shell:
+		"""
+		cd data/ref_data && 
+		cellranger mkref --genome=dm6 \
+               --fasta={input.fa} \
+               --genes={input.gtf}
+    	"""
+
+## COUNT
+
+rule cellranger_count_pilot:
+	input:
+		fastqs = "data/H27M5AFX2/outs/fastq_path/H27M5AFX2/PCNA-GFP_Rep1/",
+		ref = "data/ref_data/dm6"
+	output:
+		"data/counts/PCNA-GFP_Rep1/outs/web_summary.html"
+	threads: 16
+	shell:
+		"""
+		cellranger count --id=PCNA-GFP_Rep1 \
+                   --transcriptome={input.ref} \
+                   --fastqs={input.fastqs} \
+                   --sample=PCNA-GFP_Rep1 \
+                   --expect-cells=5000 \
+                   --localcores={threads} \
+                   --localmem=114 \
+    && mv PCNA-GFP_Rep1/ data/counts/
+    """
+
+rule cellranger_count:
+	input:
+		fastqs = "data/H22TWBGXF/outs/fastq_path/H22TWBGXF/{sample_name}/",
+		ref = "data/ref_data/dm6"
+	output:
+		"data/counts/{sample_name}/outs/web_summary.html"
+	threads: 16
+	shell:
+		"""
+		cellranger count --id={wildcards.sample_name} \
+                   --transcriptome={input.ref} \
+                   --fastqs={input.fastqs} \
+                   --sample={wildcards.sample_name} \
+                   --expect-cells=5000 \
+                   --localcores={threads} \
+                   --localmem=114 w\
+    && mv {wildcards.sample_name}/ data/counts/ \
+    && mv __{wildcards.sample_name}.mro data/counts/
+    """
+
+
+## AS-BULK analysis with Salmon
+
+rnaseq_lookup_dict = {"PCNA-GFP_Rep1": "S1",
+					  "w1118_Rep1": "S1",
+					  "gd7_Rep1": "S2",
+					  "Tollrm910_Rep1": "S3",
+					  "Toll10B_Rep1": "S4"}
+
+def rnaseq_sample_lookup2(wildcards):
+	sample_id = rnaseq_lookup_dict[wildcards.sample_name]
+	d = {lane: "data/fastq/" + wildcards.sample_name + "_" + sample_id + "_" + lane + "_R2_001.fastq.gz" for lane in ["L001", "L002", "L003", "L004"]}
+	return d
+
+rule make_salmon_index:
+	output:
+		directory("dmel_6.30_salmon_index/")
+	threads: 8
+	shell:
+		"salmon --version && "
+		"salmon index -t ../external_data/flybase/dmel-all-transcript-r6.30.fasta.gz -i dmel_6.30_salmon_index/ -p {threads}"
+
+rule salmon_quantify:
+	input:
+		unpack(rnaseq_sample_lookup2),
+		index = "dmel_6.30_salmon_index/"
+	output:
+		"rnaseq_quantifications/{sample_name}/quant.sf"
+	threads: 8
+	shell:
+		"salmon --version && "
+		"salmon quant -i {input.index} -l A "
+		"-r {input.L001} {input.L002} {input.L003} {input.L004} "
+		"--validateMappings --seqBias -p {threads} "
+        "-o rnaseq_quantifications/{wildcards.sample_name}/"

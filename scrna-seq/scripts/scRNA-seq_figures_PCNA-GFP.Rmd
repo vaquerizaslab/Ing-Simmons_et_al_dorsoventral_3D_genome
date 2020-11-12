@@ -1,0 +1,1418 @@
+---
+title: "scRNA-seq analysis"
+author: "Liz Ing-Simmons"
+date: "16/01/2020"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r global_options, echo=FALSE}
+knitr::opts_chunk$set(fig.width=6, fig.height=4, dpi = 300, out.width = "60%",
+             warning=FALSE, message=FALSE, error= FALSE, dev = c("png", "pdf"))
+pdf.options(useDingbats = FALSE)
+options(stringsAsFactors = FALSE)
+
+seed <- 20200116
+
+colour_scheme <- c("PCNA-GFP" = "black", "w1118" = "grey", "control1" = "black", "control2" = "grey",
+                   gd7 = "#648FFF", Tollrm910 = "#DC267F", Toll10B = "#FFB000")
+```
+
+```{r load_packages, cache = FALSE}
+# library("conflicted")
+library("tximport")
+library("DESeq2")
+library("pheatmap")
+library("DropletUtils")
+library("Matrix")
+library("scater")
+library("scran")
+library("scDblFinder")
+library("Seurat")
+library("dplyr")
+library("ggplot2")
+library("clustree")
+library("clusterProfiler")
+library("org.Dm.eg.db")
+library("patchwork")
+library("paletteer")
+library("ComplexHeatmap")
+library("scales")
+```
+
+```{r functions}
+plotPCA_custom <- function(object, intgroup="condition", ntop=500, returnData=FALSE)
+{
+  # calculate the variance for each gene
+  rv <- rowVars(assay(object))
+  
+  # select the ntop genes by variance
+  select <- order(rv, decreasing=TRUE)[seq_len(min(ntop, length(rv)))]
+  
+  # perform a PCA on the data in assay(x) for the selected genes
+  pca <- prcomp(t(assay(object)[select,]))
+  
+  # the contribution to the total variance for each component
+  percentVar <- pca$sdev^2 / sum( pca$sdev^2 )
+  
+  if (!all(intgroup %in% names(colData(object)))) {
+    stop("the argument 'intgroup' should specify columns of colData(dds)")
+  }
+  
+  intgroup.df <- as.data.frame(colData(object)[, intgroup, drop=FALSE])
+  
+  # add the intgroup factors together to create a new grouping factor
+  group <- if (length(intgroup) > 1) {
+    factor(apply( intgroup.df, 1, paste, collapse=":"))
+  } else {
+    colData(object)[[intgroup]]
+  }
+  
+  # assembly the data for the plot
+  d <- data.frame(PC1=pca$x[,1], PC2=pca$x[,2], PC3=pca$x[,3], PC4=pca$x[,4],
+                  group=group, intgroup.df, name=colnames(object))
+  
+  if (returnData) {
+    attr(d, "percentVar") <- percentVar[1:4]
+    return(d)
+  }
+  
+  ggplot(data=d, aes_string(x="PC1", y="PC2", color="group")) + geom_point(size=3) + 
+    xlab(paste0("PC1: ",round(percentVar[1] * 100),"% variance")) +
+    ylab(paste0("PC2: ",round(percentVar[2] * 100),"% variance")) +
+    coord_fixed()
+}
+```
+
+
+# Compare bulk and scRNA-seq
+
+I've treated the scRNA-seq as if it was bulk and quantified it with Salmon. Now I'll compare it to bulk RNA-seq from Koenecke et al. 2016, to see if the mutants cluster together. 
+
+```{r get_genes, cache=TRUE}
+# transcriptome_gff <- "/home/research/vaquerizas/store/genomes/insects/Dmel/6.22/gtf/Drosophila_melanogaster.BDGP6.22.97.gtf.gz"
+transcriptome_gff <- "../../external_data/flybase/dmel-all-r6.30.gtf.gz"
+txdb <- GenomicFeatures::makeTxDbFromGFF(transcriptome_gff)
+k <- keys(txdb, keytype = "TXNAME")
+tx2gene <- AnnotationDbi::select(txdb, keys = k, columns = "GENEID", keytype = "TXNAME")
+
+gene_locations <- AnnotationDbi::select(txdb, keys = k, 
+                                        columns = c("TXCHROM", "TXSTART", "TXEND", "TXSTRAND", "GENEID"), 
+                                        keytype = "TXNAME")
+
+
+gene_names <- rtracklayer::import.gff(transcriptome_gff) %>%
+  as.data.frame() %>%
+  dplyr::filter(type == "gene") %>%
+  dplyr::select(gene_id, gene_symbol)
+```
+
+```{r read_quants, cache=TRUE}
+bulk_files <- list.files("../../external_data/koenecke_2016_2017/rnaseq_quantifications", 
+                         pattern = "quant.sf", recursive = TRUE)
+names(bulk_files) <- paste0("bulk_", dirname(bulk_files))
+bulk_files <- file.path("../../external_data/koenecke_2016_2017/rnaseq_quantifications", bulk_files) %>% 
+  setNames(names(bulk_files))
+
+sc_files <- list.files("../rnaseq_quantifications", 
+                         pattern = "quant.sf", recursive = TRUE)
+names(sc_files) <- paste0("pooled_", dirname(sc_files))
+sc_files <- file.path("../rnaseq_quantifications", sc_files) %>% 
+  setNames(names(sc_files))
+files <- c(bulk_files, sc_files)
+txi <- tximport(files, type = "salmon", tx2gene = tx2gene)
+```
+
+The `tximport` package imports the quantifications at transcript level and produces gene-level estimated counts. `DESeq2` uses these and the transcript-level abundance estimates to calculate a gene-level offset that corrects for changes to the average transcript length across samples (i.e., from different isoform usage).
+
+```{r deseq, cache=TRUE}
+sampleTable <- data.frame(samples = names(files)) %>% 
+  tidyr::separate(samples, into = c("condition", "genotype", "replicate"), sep = "_", remove = FALSE) %>% 
+  tibble::column_to_rownames("samples") %>% 
+  mutate(genotype = case_when(genotype == "tl10b" ~ "Toll10B",
+                              genotype == "tlrm910" ~ "Tollrm910",
+                              TRUE ~ genotype))
+
+dds <- DESeqDataSetFromTximport(txi, sampleTable, ~1) # just for visualisation, no statistical testing!
+
+```
+
+```{r transform_data, cache=TRUE}
+transformed_data <- vst(dds, blind=FALSE)
+```
+
+## Sample clustering {.tabset}
+
+For visualisation purposes, I'm using the variance stabilising transformation to transform the estimated counts. 
+
+### Hierarchical clustering
+
+```{r cluster_samples, cache=TRUE, dependson="transform_data"}
+sampleDists <- dist(t(assay(transformed_data)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- colnames(transformed_data)
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(RColorBrewer::brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+```
+
+### PC1 vs. PC2
+
+```{r plot_pca, cache=TRUE, dependson="transform_data"}
+pcaData <- plotPCA_custom(transformed_data, 
+                          intgroup=c("condition", "genotype", "replicate"), 
+                          returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+pcaData <- pcaData %>% 
+  mutate(genotype = case_when(genotype == "PCNA-GFP" ~ "control1",
+                              genotype == "w1118" ~ "control2",
+                              TRUE ~ genotype)) %>% 
+  mutate(genotype = factor(genotype, levels = c("control1", "control2", "gd7", "Tollrm910", "Toll10B")))
+```
+
+
+```{r plot_pca2, cache=TRUE, dependson="transform_data2"}
+pc1_2 <- ggplot(pcaData, aes(PC1, PC2, color=genotype, shape = condition)) +
+  geom_point(size=3, alpha = 0.8) +
+  xlab(paste0("PC1: ", percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ", percentVar[2],"% variance")) + 
+  # coord_fixed() +
+  theme_bw() +
+  scale_colour_manual(values = colour_scheme)
+pc1_2 + coord_fixed()
+```
+
+### PC1 vs. PC3
+
+```{r}
+
+ggplot(pcaData, aes(PC1, PC3, color=genotype, shape = condition)) +
+  geom_point(size=3, alpha = 0.8) +
+  xlab(paste0("PC1: ", percentVar[1],"% variance")) +
+  ylab(paste0("PC3: ", percentVar[3],"% variance")) +
+  coord_fixed() +
+  theme_bw() +
+  scale_colour_manual(values = colour_scheme)
+```
+
+### PC2 vs. PC3
+
+```{r}
+pc2_3 <- ggplot(pcaData, aes(PC3, PC2, color=genotype, shape = condition)) +
+  geom_point(size=3, alpha = 0.8) +
+  xlab(paste0("PC3: ", percentVar[3],"% variance")) +
+  ylab(paste0("PC2: ", percentVar[2],"% variance")) +
+  # coord_fixed() +
+  theme_bw() +
+  scale_colour_manual(values = colour_scheme)
+pc2_3 + coord_fixed()
+```
+
+```{r, fig.height = 2, fig.width = 4}
+pc1_2 <- pc1_2 + 
+  theme_bw(base_size = 12) + 
+  theme(legend.position = "none", panel.grid.minor = element_blank())
+pc2_3 <- pc2_3 + 
+  theme_bw(base_size = 12) + 
+  theme(legend.position = "none", panel.grid.minor = element_blank())
+        
+legend_b <- cowplot::get_legend(
+  pc1_2 + 
+    guides(color = guide_legend(nrow = 1), shape = guide_legend(nrow = 2)) +
+    theme(legend.position = "bottom")
+)
+
+
+pca_plots <- cowplot::plot_grid(pc1_2, pc2_3, 
+                                align = "v", axis = "tb", rel_widths = c(2, 1))
+p_pca <- cowplot::plot_grid(pca_plots, legend_b, ncol = 1, rel_heights = c(1, .2))
+p_pca
+pdf("../figures/figure_2_panels/pca_1_2_3.pdf", width = 3, height = 2)
+p_pca
+dev.off()
+```
+
+```{r fig.width=5, fig.height=2}
+p <- pc1_2 + coord_fixed() + theme(legend.position = "right", legend.box = "horizontal")
+p
+pdf("../figures/figure_2_panels/pca_1_2.pdf", width = 5, height = 2)
+p
+dev.off()
+```
+
+# Read in filtered count matrix from CellRanger
+
+CellRanger's method of identifying empty droplets seems to be most accurate for this data compared to e.g. `emptyDrops()` or setting a fixed UMI threshold as suggested in the Seurat workflow. The other approaches returned many more than the expected ~5000 cells. 
+
+```{r}
+gene_ids_key <- rtracklayer::import.gff("../../external_data/flybase/dmel-all-r6.30.gtf.gz") %>% 
+  as.data.frame() %>%
+  dplyr::filter(type == "gene") %>%
+  dplyr::select(gene_id, gene_symbol)
+
+
+samples <- c("PCNA-GFP_Rep1", "w1118_Rep1", "gd7_Rep1", "Tollrm910_Rep1", "Toll10B_Rep1")
+filtered_counts <- paste0("../data/counts/", samples, "/outs/filtered_feature_bc_matrix/")
+filtered_data_sce_list <- lapply(filtered_counts, function(f) {
+  DropletUtils::read10xCounts(f, col.names = TRUE)})
+names(filtered_data_sce_list) <- samples
+```
+
+# Plot QC metrics and filter data
+
+The filtering approach from `scater` is nice because it identifies outliers based on the median absolute deviation of the criterion, rather than relying on a fixed threshold. Here I use it only to filter cells with high mitochondrial content.
+
+```{r mitochondrial_content2}
+## Here I'll also calculate % maternal/zygotic gene expression for later reference
+lott_matzyg_genes <- readr::read_delim("../data/external_data/lott_2011/lott2011_current_ids.txt", 
+                                col_names = TRUE, delim = "\t")
+
+mat_genes <- lott_matzyg_genes %>% 
+  dplyr::filter(CLASS == "mat") %>% 
+  pull(current_id)
+
+matzyg_genes <- lott_matzyg_genes %>% 
+  dplyr::filter(CLASS == "matzyg") %>% 
+  pull(current_id)
+
+zyg_genes <- lott_matzyg_genes %>% 
+  dplyr::filter(CLASS == "zyg") %>% 
+  pull(current_id)
+
+is.mito <- grep("^mt:", rowData(filtered_data_sce_list[[1]])$Symbol)
+
+saunders_strict_maternal <- readr::read_delim("../data/external_data/saunders_2013/Supp_TableS2_current_ids_20200220.txt", 
+                                              delim = "\t", col_names = "current_id") %>% 
+  pull(current_id)
+
+kwasnieski_data <- read.table("../data/external_data/kwasnieski_2019/Supp_TableS1_with_ids_20200303.txt",
+                              sep = "\t", header = TRUE, stringsAsFactors = FALSE)
+
+kwasnieski_nc7_9 <- kwasnieski_data$current_id[kwasnieski_data$NC_7.9]
+kwasnieski_nc9_10 <- kwasnieski_data$current_id[kwasnieski_data$NC_9.10]
+kwasnieski_syncytial_blastoderm <- kwasnieski_data$current_id[kwasnieski_data$SYNCYTIAL_BLASTODERM]
+kwasnieski_cellular_blastoderm <- kwasnieski_data$current_id[kwasnieski_data$CELLULARIZED_BLASTODERM]
+
+qc <- function(sce){
+  sce_qc <- perCellQCMetrics(sce, 
+                             subsets=list(MT=is.mito,
+                                          kwasnieski_nc7_9 = rowData(sce)$ID %in% kwasnieski_nc7_9,
+                                          kwasnieski_nc9_10 = rowData(sce)$ID %in% kwasnieski_nc9_10,
+                                          kwasnieski_syncyt = rowData(sce)$ID %in% kwasnieski_syncytial_blastoderm,
+                                          kwasnieski_cellular = rowData(sce)$ID %in% kwasnieski_cellular_blastoderm,
+                                          strict_mat = rowData(sce)$ID %in% saunders_strict_maternal,
+                                          mat = rowData(sce)$ID %in% mat_genes,
+                                          matzyg = rowData(sce)$ID %in% matzyg_genes,
+                                          zyg = rowData(sce)$ID %in% zyg_genes))
+
+  high_mito <- isOutlier(sce_qc$subsets_MT_percent, type="higher")
+  
+  colData(sce) <- cbind(colData(sce), sce_qc)
+  sce$high_mito <- high_mito
+  return(sce)
+}
+
+filtered_data_sce_list <- lapply(filtered_data_sce_list, qc)
+
+plot_list <- lapply(filtered_data_sce_list, function(sce){
+  list(plotColData(sce, y="sum", colour_by="high_mito") +
+        scale_y_log10() + labs(y = "Total count"),
+    plotColData(sce, y="detected", colour_by="high_mito") +
+        scale_y_log10() + labs(y = "Detected features"),
+    plotColData(sce, y="subsets_MT_percent",
+        colour_by="high_mito") + labs(y = "Mito percent"),
+    plotColData(sce, x="sum", y="subsets_MT_percent",
+      colour_by="high_mito") + labs(y = "Mito percent") + scale_x_log10())
+})
+
+plot_list <- unlist(plot_list, recursive = FALSE)
+```
+
+```{r fig.width=12, fig.height=12, out.width="100%"}
+labels <- rep("", 20)
+labels[(0:4*4) + 1] <- samples
+cowplot::plot_grid(plotlist = plot_list, nrow = 5, ncol = 4, labels = labels)
+```
+
+```{r, eval = FALSE}
+# Optionally check whether there is cell type bias during filtering!
+
+# The biggest practical concern during QC is whether an entire cell type is inadvertently
+# discarded. There is always some risk of this occurring as the QC metrics are never fully
+# independent of biological state. We can diagnose cell type loss by looking for systematic
+# differences in gene expression between the discarded and retained cells. To demonstrate, we
+# compute the average count across the discarded and retained pools in the 416B data set, 
+# and we compute the log-fold change between the pool averages.
+
+lost <- calculateAverage(counts(unfiltered)[,!high_mito])
+kept <- calculateAverage(counts(unfiltered)[,high_mito])
+
+logged <- edgeR::cpm(cbind(lost, kept), log=TRUE, prior.count=2)
+logFC <- logged[,1] - logged[,2]
+abundance <- rowMeans(logged)
+
+plot(abundance, logFC, xlab="Average count", ylab="Log-FC (lost/kept)", pch=16)
+points(abundance[is.mito], logFC[is.mito], col="dodgerblue", pch=16)
+
+# It doesn't look like any genes are specifically upregulated in the cells removed due to high mitochondrial content, which is good.
+# 
+# It *does* look like mitochondrial genes are specifically downregulated in the retained cells compared to the removed cells. This is not the case in [the example from the OSCA book](https://osca.bioconductor.org/quality-control.html#removing-low-quality-cells), but that is probably because in that example cells are removed based on a combination of factors, not just based on high mitochondrial gene expression. 
+
+```
+
+## Identification and removal of doublets
+
+```{r}
+# using 10x suggested multiplet rate, which is lower than the default of 1% per thousand cells
+set.seed(seed)
+filtered_data_sce_list <- lapply(filtered_data_sce_list, scDblFinder, dbr = 0.039)
+sapply(filtered_data_sce_list, function(sce) table(sce$scDblFinder.class))
+
+```
+
+
+## Filtering data
+
+```{r}
+filtered_data_sce_list <- lapply(filtered_data_sce_list, function(sce){
+  sce[, !sce$high_mito & sce$scDblFinder.class == "singlet"]
+})
+```
+
+# Normalisation for library size across cells
+
+```{r}
+# library size normalisation
+normalise_sce <- function(sce){
+  set.seed(100)
+  clust <- quickCluster(sce) 
+  sce <- computeSumFactors(sce, cluster=clust)
+  sce <- logNormCounts(sce)
+  return(sce)
+}
+
+filtered_data_sce_list <- lapply(filtered_data_sce_list, normalise_sce)
+```
+
+# Finding variable features 
+
+```{r}
+# find variable fetaures
+filtered_data_seurat_list <- lapply(filtered_data_sce_list, as.Seurat)
+
+filtered_data_seurat_list <- lapply(filtered_data_seurat_list, function(s){
+  FindVariableFeatures(s, selection.method = "vst", nfeatures = 3000)
+})
+
+```
+
+# Integration of datasets using PCNA-GFP as a reference
+
+```{r}
+reference_data <- base::which(names(filtered_data_seurat_list)%in% "PCNA-GFP_Rep1")
+
+anchors <- FindIntegrationAnchors(filtered_data_seurat_list, dims = 1:30, reference = reference_data)
+integrated_data <- IntegrateData(anchors, dims = 1:30)
+integrated_data$Sample <- gsub("_Rep1/outs/filtered_feature_bc_matrix/", "", 
+                               gsub("../data/counts/", "", integrated_data$Sample))
+
+all.genes <- rownames(integrated_data)
+integrated_data <- ScaleData(integrated_data, features = all.genes)
+```
+
+
+## Determine dimensionality (how many PCs to keep)
+
+```{r}
+integrated_data <- RunPCA(integrated_data, 
+                           features = VariableFeatures(object = integrated_data), 
+                           verbose = FALSE)
+DimPlot(integrated_data, reduction = "pca", group.by = "Sample")+ 
+  scale_color_manual(values = colour_scheme)
+
+
+## from pipeComp package
+farthestPoint <- function(y, x=NULL){
+  if(is.null(x)) x <- 1:length(y)
+  d <- apply( cbind(x,y), 1, 
+              a=c(1,y[1]), b=c(length(y),rev(y)[1]), 
+              FUN=function(y, a, b){
+                v1 <- a-b
+                v2 <- y-a
+                abs(det(cbind(v1,v2)))/sqrt(sum(v1*v1))
+              })
+  order(d,decreasing=T)[1]
+}
+
+sdv <- Stdev(integrated_data, "pca")
+fp_est <- farthestPoint(sdv)-1
+
+ElbowPlot(integrated_data, ndims = 50) + 
+  geom_vline(aes(xintercept = fp_est), linetype = 2, colour = "blue")
+
+```
+
+
+Using the `pipeComp` `farthestPoint` appraoch of finding the point on the elbow plot furthest from a straight line joining the first and last points suggests using `r fp_est` PCs. 
+
+
+```{r}
+id_est <- intrinsicDimension::maxLikGlobalDimEst(integrated_data[["pca"]]@cell.embeddings,
+                                       k = 20, unbiased=TRUE)
+```
+
+The `maxLikGlobalDimEst` function from the `intrinsicDimension` package estimates the dimensionality of this dataset as: `r id_est`.
+
+## Clustering
+
+## Evaluate clustering with clustree
+
+```{r, fig.width=9, fig.height=8, out.width="100%"}
+resolutions <- seq(0, 1.5, by = 0.1)
+
+integrated_data <- FindNeighbors(integrated_data, dims = 1:10, k.param = 60, verbose = FALSE)
+integrated_data <- FindClusters(integrated_data, resolution = resolutions, 
+                                verbose = FALSE, random.seed = seed)
+
+clustree::clustree(integrated_data, prefix = "integrated_snn_res.", show_axis = TRUE, 
+                   node_colour = "lightgrey") +
+  labs(y = "resolution") + 
+  # scale_edge_colour_distiller(direction = 1, palette = "YlOrRd")
+  scale_edge_colour_gradient(low = "darkblue", high = "darkblue")
+
+```
+
+```{r, fig.width=9, fig.height=8, out.width="100%"}
+resolutions <- seq(0, 1.5, by = 0.1)
+
+integrated_data <- FindNeighbors(integrated_data, dims = 1:12, k.param = 60, verbose = FALSE)
+integrated_data <- FindClusters(integrated_data, resolution = resolutions, 
+                                verbose = FALSE, random.seed = seed)
+
+clustree::clustree(integrated_data, prefix = "integrated_snn_res.", show_axis = TRUE, 
+                   node_colour = "lightgrey") +
+  labs(y = "resolution") + 
+  # scale_edge_colour_distiller(direction = 1, palette = "YlOrRd")
+  scale_edge_colour_gradient(low = "darkblue", high = "darkblue")
+
+```
+
+```{r, fig.width=9, fig.height=8, out.width="100%"}
+resolutions <- seq(0, 1.5, by = 0.1)
+
+integrated_data <- FindNeighbors(integrated_data, dims = 1:15, k.param = 60, verbose = FALSE)
+integrated_data <- FindClusters(integrated_data, resolution = resolutions, 
+                                verbose = FALSE, random.seed = seed)
+
+clustree::clustree(integrated_data, prefix = "integrated_snn_res.", show_axis = TRUE, 
+                   node_colour = "lightgrey") +
+  labs(y = "resolution") + 
+  # scale_edge_colour_distiller(direction = 1, palette = "YlOrRd")
+  scale_edge_colour_gradient(low = "darkblue", high = "darkblue")
+
+```
+
+
+## Evaluate clustering by silhouette width
+
+```{r fig.width = 8, out.width="100%"}
+dims <- c(10, 12, 15)
+resolutions <- seq(0.1, 1.5, by = 0.1)
+
+measure_silhouette_width <- function(ndims, resolutions, seurat){
+ 
+  results_df <- tibble::tibble()
+  
+  for (n in ndims){
+    seurat <- FindNeighbors(seurat, dims = 1:n, k.param = 50, verbose = FALSE)
+    for (res in resolutions){
+      seurat <- FindClusters(seurat, resolution = res, verbose = FALSE, random.seed = seed)
+      si <- cluster::silhouette(as.integer(seurat$seurat_clusters),
+                            dist(seurat[["pca"]]@cell.embeddings[,1:n]))
+      df <- tibble::tibble(ndims = n, 
+                           res = res,
+                           avgsilwidth = summary(si)$clus.avg.widths,
+                           cluster_id = levels(seurat$seurat_clusters))
+      results_df <- bind_rows(results_df, df)
+    }
+  }
+  return(results_df)
+}
+
+silhouette_widths_df <- measure_silhouette_width(ndims = dims,
+                                                 resolutions = resolutions,
+                                                 seurat = integrated_data)
+silhouette_summary <- silhouette_widths_df %>% 
+  group_by(ndims, res) %>% 
+  summarise(n_clusters = n(),
+            avg_cluster_width = mean(avgsilwidth))
+
+ggplot(silhouette_widths_df, aes(x = as.factor(res), y = avgsilwidth, 
+                                  colour = as.factor(ndims), group = as.factor(ndims))) +
+  geom_point(position = position_dodge(width = 0.7)) +
+  geom_crossbar(data = silhouette_summary, aes(ymin = avg_cluster_width, 
+                                               ymax = avg_cluster_width, 
+                                               y = avg_cluster_width),
+                position = position_dodge(width = 0.7), colour = "black") +
+  geom_label(data = silhouette_summary, aes(label = n_clusters, y = avg_cluster_width + 0.05), 
+              position = position_dodge(width = 0.7), colour = "black", size = 3) + 
+  theme_bw(base_size = 14) +
+  labs(x = "Cluster resolution", y = "Cluster silhouette width", colour = "Number of PCs")
+   
+
+```
+
+## Clustering
+
+```{r}
+integrated_data <- RunUMAP(integrated_data, reduction = "pca", dims = 1:12, seed.use = seed)
+DimPlot(integrated_data, reduction = "umap", group.by = "Sample") + 
+  scale_color_manual(values = colour_scheme)
+integrated_data <- RunTSNE(integrated_data, reduction = "pca", dims = 1:12, seed.use = seed)
+DimPlot(integrated_data, reduction = "tsne", group.by = "Sample") + 
+  scale_color_manual(values = colour_scheme)
+```
+
+```{r}
+integrated_data <- FindNeighbors(integrated_data, dims = 1:12, k.param = 60)
+integrated_data <- FindClusters(integrated_data, resolution = 0.5)
+
+DimPlot(integrated_data, reduction = "umap", label = TRUE)
+DimPlot(integrated_data, reduction = "tsne", label = TRUE)
+```
+
+```{r, fig.width=16, fig.height=4}
+DimPlot(integrated_data, reduction = "umap", label = TRUE, split.by = "Sample")
+DimPlot(integrated_data, reduction = "tsne", label = TRUE, split.by = "Sample")
+```
+
+
+
+## Plot quality control features
+
+```{r}
+## add gene names to seurat object for nicer plotting
+names_key <- gene_ids_key
+rownames(names_key) <- names_key$gene_id
+
+integrated_data_with_names <- integrated_data
+
+rownames(integrated_data_with_names[["integrated"]]@data) <- names_key[rownames(integrated_data_with_names[["integrated"]]@data), "gene_symbol"]
+rownames(integrated_data_with_names[["integrated"]]@scale.data) <- names_key[rownames(integrated_data_with_names[["integrated"]]@scale.data), "gene_symbol"]
+rownames(integrated_data_with_names[["integrated"]]@counts) <- names_key[rownames(integrated_data_with_names[["integrated"]]@counts), "gene_symbol"]
+
+rownames(integrated_data_with_names[["RNA"]]@data) <- names_key[rownames(integrated_data_with_names[["RNA"]]@data), "gene_symbol"]
+rownames(integrated_data_with_names[["RNA"]]@scale.data) <- names_key[rownames(integrated_data_with_names[["RNA"]]@scale.data), "gene_symbol"]
+rownames(integrated_data_with_names[["RNA"]]@counts) <- names_key[rownames(integrated_data_with_names[["RNA"]]@counts), "gene_symbol"]
+```
+
+```{r}
+FeaturePlot(object = integrated_data_with_names, features = "sum", 
+             pt.size = 0.2, order = TRUE, max.cutoff = 100000) + 
+  ggtitle("total UMIs")
+
+VlnPlot(object = integrated_data_with_names, features = "sum",
+        pt.size = 0.2) + ggtitle("total UMIs")
+
+FeaturePlot(object = integrated_data_with_names, features = "detected", 
+             pt.size = 0.2, order = TRUE) + ggtitle("total genes")
+
+VlnPlot(object = integrated_data_with_names, features = "detected",
+        pt.size = 0.2) + ggtitle("total genes")
+
+
+FeaturePlot(object = integrated_data_with_names, features = "subsets_MT_percent", 
+            pt.size = 0.2, order = TRUE) + ggtitle("% mitochondrial transcripts")
+
+VlnPlot(object = integrated_data_with_names, features = "subsets_MT_percent",
+        pt.size = 0.2) + ggtitle("% mitochondrial transcripts")
+
+# 
+# FeaturePlot(object = integrated_data_with_names, features = "sum", max.cutoff = 50000,
+#              pt.size = 0.2, reduction = "pca") + ggtitle("total UMIs")
+```
+
+
+There is no obvious correlation between clusters / UMAP positions and mitochondrial %, number of UMIs, or number of genes detected. 
+
+## Plot marker genes
+
+```{r}
+marker_genes <- readxl::read_excel("~/cluster/dorsal_ventral/scrna-seq/data/external_data/karaiskos_2017/table_s4_marker_genes.xlsx", )
+marker_genes_with_ids <- marker_genes %>% 
+  tidyr::separate_rows(Genes, sep = ", ") %>% 
+  dplyr::mutate(Genes = case_when(Genes == "CG8129" ~ "Srr", # now has a name not just a CG
+                                  TRUE ~ Genes)) %>% 
+  left_join(gene_ids_key, by = c("Genes" = "gene_symbol"))
+# marker_genes_with_ids
+
+DimPlot(integrated_data, reduction = "umap", label = TRUE)
+
+```
+
+### Pole cells
+
+```{r}
+pole_cell_markers <- marker_genes_with_ids %>% 
+  dplyr::filter(`Cell population` == "Pole cells") %>% 
+  dplyr::filter(!is.na(gene_id)) %>% 
+  pull(Genes)
+FeaturePlot(object = integrated_data_with_names, features = pole_cell_markers) +
+  scale_colour_gradient2(low = "grey", mid = "grey", high = "blue", midpoint = 0)
+
+VlnPlot(object = integrated_data_with_names, features = pole_cell_markers, pt.size = 0.2)
+```
+
+### Yolk cells
+
+```{r, fig.width=10, fig.height=8, out.width="100%"}
+yolk_markers <- marker_genes_with_ids %>% 
+  dplyr::filter(`Cell population` == "Yolk cells") %>% 
+  dplyr::filter(!is.na(gene_id)) %>% 
+  pull(Genes)
+
+# plot_list <- lapply(yolk_markers, function(m){
+#   p <- FeaturePlot(object = integrated_data_with_names, features = m,
+#             ncol = 3, pt.size = 0.2, order = FALSE) +
+#   scale_colour_gradient2(low = "grey", mid = "grey", high = "blue", midpoint = 0)
+#   return(p)
+# })
+# 
+# cowplot::plot_grid(plotlist = plot_list, nrow = 3)
+FeaturePlot(object = integrated_data_with_names, features = yolk_markers, 
+            ncol = 3, pt.size = 0.2, order = FALSE)
+VlnPlot(object = integrated_data_with_names, features = yolk_markers, pt.size = 0.2, ncol = 3)
+
+```
+
+### Dorsal ectoderm cells
+
+```{r, fig.width=10, fig.height=8, out.width="100%"}
+dorsal_ectoderm_markers <- marker_genes_with_ids %>% 
+  dplyr::filter(`Cell population` == "Dorsal ectoderm") %>% 
+  dplyr::filter(!is.na(gene_id)) %>% 
+  pull(Genes)
+
+# plot_list <- lapply(dorsal_ectoderm_markers, function(m){
+#   p <- FeaturePlot(object = integrated_data_with_names, features = m,
+#             ncol = 3, pt.size = 0.2, order = FALSE) +
+#   scale_colour_gradient2(low = "grey", mid = "grey", high = "blue", midpoint = 0)
+#   return(p)
+# })
+# cowplot::plot_grid(plotlist = plot_list, nrow = 3)
+
+FeaturePlot(object = integrated_data_with_names, features = dorsal_ectoderm_markers, 
+            ncol = 3, pt.size = 0.2, order = FALSE)
+
+
+
+VlnPlot(object = integrated_data_with_names, features = dorsal_ectoderm_markers,
+        pt.size = 0, ncol = 3)
+```
+
+### Neurectoderm cells
+
+```{r, fig.width=10, fig.height=8, out.width="100%"}
+neurectoderm_markers <- marker_genes_with_ids %>% 
+  dplyr::filter(`Cell population` == "Neurectoderm") %>% 
+  dplyr::filter(!is.na(gene_id)) %>% 
+  pull(Genes)
+
+
+# plot_list <- lapply(neurectoderm_markers, function(m){
+#   p <- FeaturePlot(object = integrated_data_with_names, features = m,
+#             ncol = 3, pt.size = 0.2, order = FALSE) +
+#   scale_colour_gradient2(low = "grey", mid = "grey", high = "blue", midpoint = 0)
+#   return(p)
+# })
+# 
+# cowplot::plot_grid(plotlist = plot_list, nrow = 3)
+FeaturePlot(object = integrated_data_with_names, features = neurectoderm_markers, 
+            ncol = 3, pt.size = 0.2, order = FALSE)
+
+VlnPlot(object = integrated_data_with_names, features = neurectoderm_markers,
+        pt.size = 0, ncol = 3)
+```
+
+
+### Mesoderm cells
+
+```{r, fig.width=10, fig.height=12, out.width="100%"}
+mesoderm_markers <- marker_genes_with_ids %>% 
+  dplyr::filter(`Cell population` == "Mesoderm") %>% 
+  dplyr::filter(!is.na(gene_id)) %>% 
+  pull(Genes)
+
+
+# plot_list <- lapply(mesoderm_markers, function(m){
+#   p <- FeaturePlot(object = integrated_data_with_names, features = m,
+#             ncol = 3, pt.size = 0.2, order = FALSE) +
+#   scale_colour_gradient2(low = "grey", mid = "grey", high = "blue", midpoint = 0)
+#   return(p)
+# })
+# 
+# cowplot::plot_grid(plotlist = plot_list, nrow = 5)
+FeaturePlot(object = integrated_data_with_names, features = mesoderm_markers, 
+            pt.size = 0.2, order = FALSE)
+
+VlnPlot(object = integrated_data_with_names, features = mesoderm_markers,
+        pt.size = 0, ncol = 3)
+```
+
+## Plot PRO-seq markers
+
+```{r}
+pro_seq_gd7 <- readxl::read_excel("../data/external_data/pro-seq/PRO-seq_DEG_200305.xlsx", 
+                                 sheet = "gd7", skip = 1, col_names = FALSE) %>% 
+  pull(`...1`)
+# CG9505 --> Nepl4, Pepck --> Pepck1
+pro_seq_gd7[pro_seq_gd7=="CG9505"] <- "Nepl4"
+pro_seq_gd7[pro_seq_gd7=="Pepck"] <- "Pepck1"
+
+pro_seq_gd7_key <- dplyr::filter(gene_ids_key, gene_symbol %in% pro_seq_gd7)
+
+pro_seq_tollrm910 <- readxl::read_excel("../data/external_data/pro-seq/PRO-seq_DEG_200305.xlsx", 
+                                 sheet = "Toll910", skip = 1, col_names = FALSE) %>% 
+  pull(`...1`)
+pro_seq_tollrm910_key <- dplyr::filter(gene_ids_key, gene_symbol %in% pro_seq_tollrm910)
+
+pro_seq_toll10B <- readxl::read_excel("../data/external_data/pro-seq/PRO-seq_DEG_200305.xlsx", 
+                                      sheet = "TOll10b", skip = 1, col_names = FALSE) %>% 
+  pull(`...1`)
+# "CG18446" --> Lime, "ImpL3" --> Ldh
+pro_seq_toll10B[pro_seq_toll10B=="CG18446"] <- "Lime"
+pro_seq_toll10B[pro_seq_toll10B=="ImpL3"] <- "Ldh"
+pro_seq_toll10B_key <- dplyr::filter(gene_ids_key, gene_symbol %in% pro_seq_toll10B)
+```
+
+
+```{r}
+integrated_data_with_names[["percent_pro_seq_gd7"]] <- PercentageFeatureSet(integrated_data_with_names, 
+                                                                            features = pro_seq_gd7_key$gene_symbol,
+                                                                            assay = "RNA")
+integrated_data_with_names[["percent_pro_seq_Tollrm910"]] <- PercentageFeatureSet(integrated_data_with_names, 
+                                                                            features = pro_seq_tollrm910_key$gene_symbol,
+                                                                            assay = "RNA")
+integrated_data_with_names[["percent_pro_seq_Toll10B"]] <- PercentageFeatureSet(integrated_data_with_names, 
+                                                                            features = pro_seq_toll10B_key$gene_symbol,
+                                                                            assay = "RNA")
+
+FeaturePlot(object = integrated_data_with_names, features = "percent_pro_seq_gd7", 
+            pt.size = 0.2, order = TRUE) + ggtitle("percent_pro_seq_gd7")
+
+VlnPlot(object = integrated_data_with_names, features = "percent_pro_seq_gd7") + 
+  ggtitle("percent_pro_seq_gd7")
+
+FeaturePlot(object = integrated_data_with_names, features = "percent_pro_seq_Tollrm910", 
+            pt.size = 0.2, order = TRUE) + ggtitle("percent_pro_seq_Tollrm910")
+
+VlnPlot(object = integrated_data_with_names, features = "percent_pro_seq_Tollrm910") + 
+  ggtitle("percent_pro_seq_Tollrm910")
+
+FeaturePlot(object = integrated_data_with_names, features = "percent_pro_seq_Toll10B", 
+            pt.size = 0.2, order = TRUE) + ggtitle("percent_pro_seq_Toll10B")
+
+VlnPlot(object = integrated_data_with_names, features = "percent_pro_seq_Toll10B") + 
+  ggtitle("percent_pro_seq_Toll10B")
+```
+
+
+## Plotting maternal and zygotic gene expression
+
+I have downloaded gene expression data from Lott et al 2011, who identified genes with maternal vs zygotic expression.
+
+```{r}
+FeaturePlot(object = integrated_data_with_names, features = "subsets_kwasnieski_nc7_9_percent", 
+            pt.size = 0.2, order = TRUE) + ggtitle("% NC 7-9 transcripts")
+VlnPlot(object = integrated_data_with_names, features = "subsets_kwasnieski_nc7_9_percent",
+        pt.size = 0.2) + ggtitle("% NC 7-9 transcripts")
+
+FeaturePlot(object = integrated_data_with_names, features = "subsets_kwasnieski_nc9_10_percent", 
+            pt.size = 0.2, order = TRUE) + ggtitle("% NC 9-10 transcripts")
+VlnPlot(object = integrated_data_with_names, features = "subsets_kwasnieski_nc9_10_percent",
+        pt.size = 0.2) + ggtitle("% NC 9-10 transcripts")
+
+FeaturePlot(object = integrated_data_with_names, features = "subsets_kwasnieski_syncyt_percent", 
+            pt.size = 0.2, order = TRUE) + ggtitle("% syncytial blastoderm transcripts")
+VlnPlot(object = integrated_data_with_names, features = "subsets_kwasnieski_syncyt_percent",
+        pt.size = 0.2) + ggtitle("% syncytial blastoderm transcripts")
+
+FeaturePlot(object = integrated_data_with_names, features = "subsets_kwasnieski_cellular_percent", 
+            pt.size = 0.2, order = TRUE) + ggtitle("% cellular blastoderm transcripts")
+VlnPlot(object = integrated_data_with_names, features = "subsets_kwasnieski_cellular_percent",
+        pt.size = 0.2) + ggtitle("% cellular blastoderm transcripts")
+
+## 
+FeaturePlot(object = integrated_data_with_names, features = "subsets_mat_percent", 
+            pt.size = 0.2, order = TRUE) + ggtitle("% maternal transcripts")
+
+VlnPlot(object = integrated_data_with_names, features = "subsets_mat_percent",
+        pt.size = 0.2) + ggtitle("% maternal transcripts")
+
+FeaturePlot(object = integrated_data_with_names, features = "subsets_strict_mat_percent", 
+            pt.size = 0.2, order = TRUE) + ggtitle("% strictly maternal transcripts")
+
+VlnPlot(object = integrated_data_with_names, features = "subsets_strict_mat_percent",
+        pt.size = 0.2) + ggtitle("% strictly maternal transcripts")
+
+
+FeaturePlot(object = integrated_data_with_names, features = "subsets_matzyg_percent", 
+            pt.size = 0.2, order = TRUE) + ggtitle("% mat-zyg transcripts")
+
+VlnPlot(object = integrated_data_with_names, features = "subsets_matzyg_percent",
+        pt.size = 0.2) + ggtitle("% mat-zyg transcripts")
+
+
+FeaturePlot(object = integrated_data_with_names, features = "subsets_zyg_percent", 
+            pt.size = 0.2, order = TRUE) + ggtitle("% zygotic transcripts")
+
+VlnPlot(object = integrated_data_with_names, features = "subsets_zyg_percent",
+        pt.size = 0.2) + ggtitle("% zygotic transcripts")
+```
+
+
+```{r}
+gene_id_key <- readr::read_delim("gene_ids.txt", delim = "\t")
+
+gene_id_key <- left_join(gene_id_key, 
+                      AnnotationDbi::select(org.Dm.eg.db, 
+                                            keys = gene_id_key$ID, 
+                                            keytype = "FLYBASE",
+                                            columns = c("ENTREZID", "FLYBASE")),
+                      by = c("ID" = "FLYBASE"))
+```
+
+
+# Find cluster markers
+
+```{r}
+clusters <- levels(integrated_data@meta.data$seurat_clusters)
+
+vs_all_markers_list <- lapply(clusters, function(cluster_id) {
+  FindMarkers(integrated_data, ident.1 = cluster_id, only.pos = TRUE) 
+  })
+
+vs_all_markers_list <- lapply(vs_all_markers_list, function(df) {
+  df %>% 
+    tibble::rownames_to_column("ID") %>% 
+    left_join(gene_id_key)
+  })
+names(vs_all_markers_list) <- paste0(clusters, "_vs_all")
+
+lapply(vs_all_markers_list, head, n = 10)
+lapply(vs_all_markers_list, nrow)
+
+```
+
+```{r, eval=FALSE}
+comparisons <- tidyr::crossing(cluster1 = clusters, cluster2 = clusters) %>% 
+  dplyr::filter(cluster1 != cluster2)
+
+pairwise_markers_list <- purrr::pmap(comparisons, .f = function(cluster1, cluster2){
+  FindMarkers(integrated_data, ident.1 = cluster1, ident.2 = cluster2, 
+              only.pos = TRUE) 
+  })
+
+names(pairwise_markers_list) <- paste0(comparisons$cluster1, "_vs_", comparisons$cluster2)
+
+pairwise_markers_list <- lapply(pairwise_markers_list, function(df) {
+  df %>% 
+    tibble::rownames_to_column("ID") %>% 
+    left_join(gene_id_key)
+  })
+```
+
+# TF-IDF approach to marker identification
+
+```{r}
+# Inspired by this post: https://constantamateur.github.io/2020-04-10-scDE/
+
+markers_tab <- SoupX::quickMarkers(integrated_data@assays$integrated@data, 
+                                   integrated_data@meta.data$seurat_clusters,
+                                   N = 20)
+markers_tab <- left_join(markers_tab, gene_ids_key, by = c("gene"= "gene_id")) %>% 
+  dplyr::select(gene, gene_symbol, cluster, geneFrequency, secondBestClusterName, 
+                geneFrequencySecondBest, everything())
+markers_tab
+
+```
+
+## Gene Ontology enrichment analysis
+
+```{r}
+stop()
+n_cells_expressing <- rowSums(integrated_data@assays$RNA@counts > 0)
+
+universe <- gene_id_key %>% 
+  dplyr::filter(ID %in% names(n_cells_expressing[n_cells_expressing > 0])) %>%
+  pull(ENTREZID)
+
+get_go_enrich <- function(df){
+  ontologies <- c("MF", "BP", "CC")
+
+  genes <- df$ENTREZID
+
+  res <- lapply(ontologies, function(ont){
+    message(ont)
+    res <- enrichGO(gene = genes, 
+             universe = universe,
+             keyType = "ENTREZID",
+             OrgDb = org.Dm.eg.db,
+             ont = ont,
+             qvalueCutoff = 0.1)
+    simplified <- clusterProfiler::simplify(res,
+                                            cutoff = 0.7,
+                                            by = "p.adjust",
+                                            measure = "Wang")
+    return(as.data.frame(simplified))
+    # return(as.data.frame(res))
+  }) %>% setNames(ontologies) %>% bind_rows(.id = "ontology")
+  
+  return(res)
+  }
+
+vs_all_go_enrich_res_list <- purrr::map(vs_all_markers_list, get_go_enrich)
+```
+
+```{r}
+
+lapply(vs_all_markers_list, function(df){
+  dplyr::arrange(df, -avg_logFC)
+}) %>% 
+  writexl::write_xlsx(path = "../../for_paper/data/supplementary_tables/TableS2_cluster_marker_genes.xlsx")
+
+# writexl::write_xlsx(pairwise_markers_list,
+#                     path = "PCNA-GFP_new_cluster_markers_pairwise.xlsx")
+lapply(vs_all_go_enrich_res_list, function(df){
+  dplyr::arrange(df, qvalue)
+}) %>%
+  writexl::write_xlsx(path = "PCNA-GFP_new_cluster_markers_one_vs_all_go_enrichment.xlsx")
+
+```
+
+# Figures
+
+## Clusters
+
+```{r}
+cluster_assignments <- data.frame(cluster = 0:14, 
+                                  assignment = c("ectoderm1", 
+                                                 "ectoderm2",
+                                                 "cellularisation1", 
+                                                 "ectoderm3", 
+                                                 "cellularisation2", 
+                                                 "mesoderm1", 
+                                                 "mesoderm2", 
+                                                 "amnioserosa", 
+                                                 "neural1", 
+                                                 "terminal", 
+                                                 "neural2", 
+                                                 "haemocytes1", 
+                                                 "pole cells", 
+                                                 "haemocytes2", 
+                                                 "trachea precursor"))
+knitr::kable(cluster_assignments)
+
+levels(integrated_data$seurat_clusters) <- cluster_assignments$assignment
+integrated_data <- SetIdent(integrated_data, value = integrated_data$seurat_clusters)
+```
+
+
+```{r}
+integrated_data_umap <- integrated_data@reductions$umap@cell.embeddings %>% 
+  as.data.frame() %>% 
+  mutate(cluster = integrated_data@active.ident,
+         sample = integrated_data$Sample) %>% 
+  mutate(tissue_type = gsub("[[:digit:]]", "", cluster)) %>% 
+  # dplyr::filter(sample != "PCNA-GFP") %>% 
+  mutate(sample = factor(sample, levels = c("PCNA-GFP", "w1118", "gd7", "Tollrm910", "Toll10B")))
+
+cluster_colours2 <- c("ectoderm" = "#0f62fe",
+                     mesoderm = "#FFB000",
+                     neural = "#DC267F")
+```
+
+```{r, fig.width = 6, fig.height = 4}
+cluster_label_summary <- integrated_data_umap %>% 
+  group_by(cluster) %>% 
+  dplyr::summarise(mean_x = mean(UMAP_1), mean_y = mean(UMAP_2))
+
+p_all <- integrated_data_umap %>% 
+  # dplyr::filter(sample %in% c("PCNA-GFP", "w1118")) %>% 
+  ggplot(aes(x = UMAP_1, y = UMAP_2, colour = cluster)) + 
+  geom_point(size = 0.2) +
+  ggrepel::geom_label_repel(data = cluster_label_summary, 
+                  aes(x = mean_x, y = mean_y, label = cluster), 
+                  colour = "black", size = 3.5, fill = "#FFFFFFB3") +
+  # scale_color_viridis_d("", option = "C") +
+  scale_color_paletteer_d("ggthemes::Tableau_20") +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "right") +
+  guides(colour = guide_legend(override.aes = list(size=1)))
+p_all + coord_fixed()
+
+# p_all + coord_fixed() + scale_color_viridis_d("", option = "A")
+# p_all + coord_fixed() + scale_color_viridis_d("", option = "B")
+# p_all + coord_fixed() + scale_color_viridis_d("", option = "D")
+# p_all + coord_fixed() + cividis::scale_color_cividis("", discrete = TRUE)
+# p_all + coord_fixed() + scale_color_paletteer_d("ggthemes::Tableau_20")
+# p_all + coord_fixed() + scale_color_manual(values = c(paletteer_d("LaCroixColoR::paired"), "grey"))
+# # p_all + coord_fixed() + scale_color_paletteer_d("pals::stepped")
+
+pdf("../figures/figure_2_panels/all_clusters_umap.pdf", width = 6, height = 4)
+p_all + coord_fixed() + scale_color_paletteer_d("ggthemes::Tableau_20")
+dev.off()
+```
+
+
+```{r fig.width=6, fig.height = 3}
+p_clusters_by_sample <- integrated_data_umap %>% 
+  dplyr::filter(sample %in% c("PCNA-GFP", "gd7", "Tollrm910", "Toll10B")) %>% 
+  ggplot(aes(x = UMAP_1, y = UMAP_2, colour = cluster)) + 
+  geom_point(shape = ".") +
+  # ggrepel::geom_label_repel(data = cluster_label_summary, 
+  #                 aes(x = mean_x, y = mean_y, label = cluster), 
+  #                 colour = "black", size = 3.5, fill = "#FFFFFFB3") +
+  # scale_color_viridis_d("", option = "C") +
+  scale_color_paletteer_d("ggthemes::Tableau_20") +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "bottom") +
+  guides(colour = guide_legend(override.aes = list(size=1, shape = 16), nrow = 3)) +
+  facet_grid(.~sample)
+p_clusters_by_sample
+
+pdf("../figures/figure_2_panels/all_clusters_umap_per_sample.pdf", width = 6, height = 3)
+p_clusters_by_sample
+dev.off()
+```
+
+```{r fig.width=8, fig.height = 3}
+p_mutants <- integrated_data_umap %>% 
+  dplyr::filter(sample %in% c("PCNA-GFP", "gd7", "Tollrm910", "Toll10B")) %>% 
+  ggplot(aes(x = UMAP_1, y = UMAP_2)) + 
+  stat_ellipse(data = integrated_data_umap %>% 
+                 dplyr::filter(tissue_type %in% names(cluster_colours2)) %>% 
+                 dplyr::select(-sample), 
+               aes(colour = tissue_type, fill = tissue_type), geom  = "polygon", 
+               alpha = 0.2, level = 0.95) +
+  geom_point(size = 0.2, alpha = 0.2) +
+  scale_colour_manual("", values = cluster_colours2) +
+  scale_fill_manual("", values = cluster_colours2) + 
+  facet_grid(.~sample) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "bottom")
+p_mutants + coord_fixed() + theme(legend.position = "right")
+
+pdf("../figures/figure_2_panels/clusters_marked_umap.pdf", width = 7, height = 3)
+p_mutants 
+dev.off()
+```
+
+```{r, fig.width = 10, fig.height = 4}
+# cowplot::plot_grid(p_all +  theme(legend.position = "bottom") + guides(colour = guide_legend(nrow = 3, override.aes = list(size=1))), 
+#                    p_mutants, 
+#                    nrow = 1, align = "v", axis = "tb", rel_widths = c(1, 2))
+
+```
+
+
+## Plot expression of genes linked to tissue-specific enhancers
+
+```{r}
+ep_assignment_df <- read.table("../../fan-c/scripts/csaw_stringent_enhancer_gene_assignments.txt",
+                               sep = "\t", header = TRUE)
+## N.B. E-P assignment and all other analysis done using 6.30
+## scRNA-seq analysis done using 6.22 because specific files needed for pipeline
+all_ids <- rownames(integrated_data[["RNA"]]@data)
+ep_assignment_df[!(ep_assignment_df$gene_id %in% all_ids),]
+## only three genes can't be matched by gene id between the two, so I'll just remove these
+
+ep_assignment_df <- ep_assignment_df %>% 
+  dplyr::filter(gene_id %in% all_ids)
+
+gd7_gene_ids <- ep_assignment_df %>% 
+  dplyr::filter(enhancer_in == "gd7") %>% 
+  pull(gene_id) %>% 
+  unique()
+
+Tollrm910_gene_ids <- ep_assignment_df %>% 
+  dplyr::filter(enhancer_in == "Tollrm910") %>% 
+  pull(gene_id) %>% 
+  unique()
+
+Toll10B_gene_ids <- ep_assignment_df %>% 
+  dplyr::filter(enhancer_in == "Toll10B") %>% 
+  pull(gene_id) %>% 
+  unique()
+```
+
+There are `r length(gd7_gene_ids)` genes associated with gd7 enhancers, `r length(Tollrm910_gene_ids)` genes associated with Tollrm9/10 enhancers, and `r length(Toll10B_gene_ids)` genes associated with Toll10B enhancers.
+
+```{r}
+matrix <- integrated_data[["integrated"]]@data
+integrated_data[["gd7_genes_mean"]] <- colSums(matrix[rownames(matrix) %in% gd7_gene_ids, ])
+integrated_data[["Tollrm910_genes_mean"]] <- colSums(matrix[rownames(matrix) %in% Tollrm910_gene_ids, ])
+integrated_data[["Toll10B_genes_mean"]] <- colSums(matrix[rownames(matrix) %in% Toll10B_gene_ids, ])
+
+
+FeaturePlot(object = integrated_data, features = "gd7_genes_mean", 
+            pt.size = 0.2, order = TRUE)
+
+FeaturePlot(object = integrated_data, features = "Tollrm910_genes_mean", 
+            pt.size = 0.2, order = TRUE)
+
+FeaturePlot(object = integrated_data, features = "Toll10B_genes_mean", 
+            pt.size = 0.2, order = TRUE)
+
+
+integrated_data_umap <- integrated_data@reductions$umap@cell.embeddings %>% 
+  as.data.frame() %>% 
+  bind_cols(integrated_data@meta.data) %>% 
+  mutate(cluster = integrated_data@active.ident,
+         sample = integrated_data$Sample) %>% 
+  mutate(tissue_type = gsub("[[:digit:]]", "", cluster)) %>% 
+  # dplyr::filter(sample != "PCNA-GFP") %>% 
+  mutate(sample = factor(sample, levels = c("PCNA-GFP", "w1118", "gd7", "Tollrm910", "Toll10B")))
+```
+
+```{r fig.width = 7, fig.height=2.3}
+p <- integrated_data_umap %>% 
+  dplyr::select(UMAP_1, UMAP_2, gd7_genes_mean, Tollrm910_genes_mean, Toll10B_genes_mean) %>% 
+  tidyr::pivot_longer(cols = ends_with("mean"), names_to = "gene_set",
+                      values_to = "mean_expr") %>% 
+  mutate(gene_set = factor(gsub("_genes_mean", "", gene_set), levels = c("gd7", "Tollrm910", "Toll10B"))) %>% 
+  group_by(gene_set) %>% 
+  mutate(mean_expr_zscore = scale(mean_expr, center = TRUE, scale = TRUE)) %>% 
+  ggplot(aes(x = UMAP_1, y = UMAP_2, colour = mean_expr_zscore)) +
+  geom_point(shape = ".") +
+  facet_grid(.~gene_set) +
+  # scale_colour_gradientn("Expression\nZ-score", colours = c("#f2f4f8", "#c1c7cd", "#61729D", "#001d6c"), 
+  #                        limits = c(-2, 4), oob = scales::squish) +
+  # scale_color_viridis_c("", option = "C", limits = c(-2, 4), oob = scales::squish, direction = 1) +
+  # scale_colour_gradientn(colours = c("#f2f4f8","#c1c7cd",  "#001d6c")) +
+  scale_colour_gradientn("Expression\nZ-score", 
+                         colours = c("#f2f4f8", "#c1c7cd", "#6768AA", "#0D0887"), 
+                         limits = c(-2, 4), oob = scales::squish) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "right") 
+p + coord_fixed()
+
+pdf("../figures/figure_2_panels/tissue_specific_genes_expr_umap.pdf", width = 7, height = 2.3)
+p
+dev.off()
+```
+
+
+
+```{r,fig.width=7, fig.height=8}
+cowplot::plot_grid(p_all, p_mutants + theme(legend.position = "right"), p, 
+                   nrow = 3, rel_heights = c(2, 1, 1),
+                   align = "v", axis = "lr")
+
+pdf("../figures/figure_2_panels/figure_2_main.pdf", width = 7, height = 8)
+cowplot::plot_grid(p_all,
+                   p_mutants + theme(legend.position = "right"), p, 
+                   nrow = 3, rel_heights = c(2, 1, 1),
+                   align = "v", axis = "lr")
+dev.off()
+```
+
+## Plot expression of marker genes
+
+```{r}
+de_gene_ids <- marker_genes_with_ids %>% 
+  dplyr::filter(`Cell population` == "Dorsal ectoderm") %>% 
+  pull(gene_id)
+
+ne_gene_ids <- marker_genes_with_ids %>% 
+  dplyr::filter(`Cell population` == "Neurectoderm") %>% 
+  pull(gene_id)
+
+me_gene_ids <- marker_genes_with_ids %>% 
+  dplyr::filter(`Cell population` == "Mesoderm") %>% 
+  pull(gene_id)
+
+pc_gene_ids <- marker_genes_with_ids %>% 
+  dplyr::filter(`Cell population` == "Pole cells") %>% 
+  pull(gene_id)
+
+```
+
+There are `r length(de_gene_ids)` marker genes for dorsal ectoderm, `r length(ne_gene_ids)` marker genes for neurectoderm, and `r length(me_gene_ids)` mesoderm marker genes from Karaiskos et al. 
+
+```{r}
+matrix <- integrated_data[["integrated"]]@data
+integrated_data[["de_genes_mean"]] <- colSums(matrix[rownames(matrix) %in% de_gene_ids, ])
+integrated_data[["ne_genes_mean"]] <- colSums(matrix[rownames(matrix) %in% ne_gene_ids, ])
+integrated_data[["me_genes_mean"]] <- colSums(matrix[rownames(matrix) %in% me_gene_ids, ])
+integrated_data[["pc_genes_mean"]] <- colSums(matrix[rownames(matrix) %in% pc_gene_ids, , drop = FALSE])
+
+FeaturePlot(object = integrated_data, features = "de_genes_mean", 
+            pt.size = 0.2, order = TRUE)
+
+FeaturePlot(object = integrated_data, features = "ne_genes_mean", 
+            pt.size = 0.2, order = TRUE)
+
+FeaturePlot(object = integrated_data, features = "me_genes_mean", 
+            pt.size = 0.2, order = TRUE)
+
+FeaturePlot(object = integrated_data, features = "pc_genes_mean", 
+            pt.size = 0.2, order = TRUE)
+
+
+integrated_data_umap <- integrated_data@reductions$umap@cell.embeddings %>% 
+  as.data.frame() %>% 
+  bind_cols(integrated_data@meta.data) %>% 
+  mutate(cluster = integrated_data@active.ident,
+         sample = integrated_data$Sample) %>% 
+  mutate(tissue_type = gsub("[[:digit:]]", "", cluster)) %>% 
+  # dplyr::filter(sample != "PCNA-GFP") %>% 
+  mutate(sample = factor(sample, levels = c("PCNA-GFP", "w1118", "gd7", "Tollrm910", "Toll10B")))
+```
+
+```{r fig.width = 7, fig.height=6}
+p_marker_genes <- integrated_data_umap %>% 
+  dplyr::filter(sample != "w1118") %>% 
+  dplyr::select(UMAP_1, UMAP_2, sample, de_genes_mean, ne_genes_mean, me_genes_mean, pc_genes_mean) %>% 
+  tidyr::pivot_longer(cols = ends_with("mean"), names_to = "gene_set",
+                      values_to = "mean_expr") %>% 
+  mutate(gene_set = case_when(
+    gene_set == "de_genes_mean" ~ "Dorsal ectoderm",
+    gene_set == "ne_genes_mean" ~ "Neuroectoderm",
+    gene_set == "me_genes_mean" ~ "Mesoderm",
+    gene_set == "pc_genes_mean" ~ "Pole cells",
+  )) %>% 
+  mutate(gene_set = factor(gene_set, levels = c("Dorsal ectoderm", "Neuroectoderm", "Mesoderm", "Pole cells"))) %>% 
+  group_by(gene_set) %>% 
+  mutate(mean_expr_zscore = scale(mean_expr, center = TRUE, scale = TRUE)) %>% 
+  ggplot(aes(x = UMAP_1, y = UMAP_2, colour = mean_expr_zscore)) +
+  geom_point(shape = ".") +
+  facet_grid(gene_set ~ sample) +
+  scale_colour_gradientn("Expression\nZ-score", colours = c("#f2f4f8", "#c1c7cd", "#61729D", "#001d6c"), 
+                         limits = c(-2, 4), oob = scales::squish) +
+  # scale_colour_gradientn(colours = c("#f2f4f8","#c1c7cd",  "#001d6c")) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "right") 
+p_marker_genes + coord_fixed()
+
+pdf("../figures/figure_2_panels/marker_genes_expr_umap.pdf", width = 7, height = 6)
+p_marker_genes 
+dev.off()
+```
+
+```{r, fig.width=7, fig.height=8}
+(p_clusters_by_sample + 
+ theme(legend.position = "right") +
+ guides(colour = guide_legend(override.aes = list(size=1, shape = 16), ncol = 1))) / 
+  p_marker_genes + 
+  plot_layout(heights = c(1, 4))
+
+
+pdf("../figures/figure_2_panels/figure_2_supp_panels.pdf", width = 7, height = 8)
+(p_clusters_by_sample + 
+ theme(legend.position = "right") +
+ guides(colour = guide_legend(override.aes = list(size=1, shape = 16), ncol = 1))) / 
+  p_marker_genes + 
+  plot_layout(heights = c(1, 4))
+dev.off()
+```
+
+## Marker gene heatmap
+
+```{r}
+heatmap_features <- lapply(vs_all_markers_list, function(df){
+  df %>% arrange(-avg_logFC, p_val_adj) %>% 
+    slice_head(n = 10)
+}) %>% bind_rows() %>% 
+  pull(Symbol) %>% 
+  unique()
+
+heatmap_features_label <- unique(c(marker_genes_with_ids$Genes[marker_genes_with_ids$Genes %in% heatmap_features],
+                            "ab", "sca", "bnk", "toc", "slam", 
+                            "Mlc2", "twi", "Ance", "scrt", "fkh", "fne",
+                             "vkg", "pgc", "PPO1", "Osi7"))
+
+
+heatmap_cells <- names(integrated_data_with_names$Sample[integrated_data_with_names$Sample=="PCNA-GFP"])
+
+heatmap_subset <- integrated_data_with_names[heatmap_features, heatmap_cells]
+heatmap_matrix <- as.matrix(heatmap_subset[["integrated"]]@scale.data)
+heatmap_subset_clusters <- heatmap_subset$seurat_clusters
+
+heatmap_matrix <- heatmap_matrix[heatmap_features[heatmap_features %in% rownames(heatmap_subset)],
+                                 order(heatmap_subset_clusters)]
+
+heatmap_colour_scale <- circlize::colorRamp2(c(-1.5, 0, 2.5), c(scales::muted("blue", c =90), "white", scales::muted("red", c = 90)))
+
+cluster_colours <- as.vector(paletteer_d("ggthemes::Tableau_20", n = 15))
+names(cluster_colours) <- 0:14
+
+
+cluster_anno <- ComplexHeatmap::HeatmapAnnotation(cluster = heatmap_subset_clusters[order(heatmap_subset_clusters)],
+                                        col = list(cluster = cluster_colours),
+                                        show_legend = FALSE)
+
+gene_label_anno <- ComplexHeatmap::rowAnnotation(genes = anno_mark(at = match(heatmap_features_label, rownames(heatmap_matrix)), 
+                                                                   labels = heatmap_features_label, labels_gp = gpar(fontsize = 10)))
+heatmap <- ComplexHeatmap::Heatmap(heatmap_matrix,
+                                   col = heatmap_colour_scale,
+                                   name = "scaled\nexpr.",
+                                   cluster_columns = FALSE, 
+                                   cluster_rows = FALSE, show_row_dend = FALSE,
+                                   show_row_names = FALSE, show_column_names = FALSE, 
+                                   top_annotation = cluster_anno,
+                                   right_annotation = gene_label_anno)
+heatmap
+
+```
+
+
+```{r, fig.width=7, fig.height=8}
+legend_clusters <- cowplot::get_legend(
+  p_all +
+    guides(color = guide_legend(nrow = 3, title = NULL, override.aes = list(size=2))) +
+    theme(legend.position = "bottom")
+)
+
+hm <- grid.grabExpr(draw(heatmap))
+
+fig2 <- cowplot::plot_grid(cowplot::plot_grid(p_all + theme_void() + theme(legend.position="none"),
+                                      hm),
+                   legend_clusters, 
+                   cowplot::plot_grid(p_mutants + theme(legend.position = "right", 
+                                      axis.title=element_blank(), 
+                                      axis.text=element_blank(), 
+                                      axis.ticks=element_blank(),
+                                     axis.line = element_blank()),
+                   p + theme(axis.title=element_blank(), 
+                              axis.text=element_blank(), 
+                              axis.ticks=element_blank(),
+                             axis.line = element_blank()),
+                   nrow = 2, align = "vh", axis = "lr"),
+                   nrow = 3, rel_heights = c(1.6, 0.4, 2))
+fig2
+
+pdf("../figures/figure_2_panels/figure_2_main_with_heatmap.pdf", width = 7, height = 8)
+fig2
+dev.off()
+```
+
+```{r}
+saveRDS(integrated_data, file = "seurat_integrated_data_PCNA-GFP.rds")
+saveRDS(integrated_data_with_names, file = "seurat_integrated_data_with_names_PCNA-GFP.rds")
+
+```
+
+# Session info
+
+This report was generated at `r format(Sys.time(), "%X, %a %b %d %Y")`. 
+
+```{r}
+devtools::session_info()
+```
