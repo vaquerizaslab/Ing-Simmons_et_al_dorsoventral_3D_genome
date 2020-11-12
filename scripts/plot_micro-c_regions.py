@@ -172,7 +172,7 @@ toll10b_enh_plot = fancplot.GenomicFeaturePlot(toll10b_enh,
 
 
 def plot_region(name, region, promoter, rnaseq_ylim):
-    output_file = os.path.join("figures", "figure_microc_panels", res,  name + ".pdf")
+    output_file = os.path.join("figures", "figure_5_panels", res,  name + ".pdf")
     logging.info("Working on %s", name)
     logging.info("Will write output to %s", output_file)
 
@@ -245,15 +245,15 @@ regions = [
            # expressed in Toll10B
            ("twi", "2R:22,970,000-23,070,000", "2R:23045321-23047320", 100),  # twi
            ("sna", "2L:15,430,000-15,530,000", "2L:15477261-15479260", 100),  # sna
-           ("if", "X:16,750,000-16,800,000", "X:16782435-16784434", 15),   # if
+           ("if", "X:16,750,000-16,800,000", "X:16782435-16784434", 10),   # if
            ("NetA", "X:14,600,000-14,800,000", "X:14652882-14654881", 20),   # NetA, NetB
            # expressed in Tollrm9/10
            ("sog", "X:15,600,000-15,650,000", "X:15625541-15627540", 30),   # sog
            ("brk", "X:7,250,000-7,350,000", "X:7306938-7308937", 30),  # brk
            # expressed in gd7
-           ("Doc1", "3L:8,990,000-9,060,000", "3L:9040601-9042600", 20),    # Doc1, Doc2
+           ("Doc1", "3L:8,990,000-9,060,000", "3L:9040601-9042600", 10),    # Doc1, Doc2
            ("pnr", "3R:16,000,000-16,050,000", "3R:16033585-16035584", 15),  # pnr
-           ("C15", "3R:21,480,000-21,530,000", "3R:21498985-21500984", 15),  # C15
+           ("C15", "3R:21,480,000-21,530,000", "3R:21498985-21500984", 10),  # C15
            # regions from Ghavi-Helm et al. 2014
            # ap, Abd-b, E2f, pdm2, Con, eya, stumps, Mef2, sli and slp1 genes
            ("ap", "2R:5,600,000-5,800,000", "2R:5725833-5727832", 20),

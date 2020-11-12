@@ -19,9 +19,7 @@ rule make_enhancers:
     output:
        "make_candidate_enhancers.html",
         expand("data/supplementary_tables/{sample}_candidate_enhancers.bed",
-            sample=["gd7", "Tollrm910", "Toll10B"]),
-        "figures/figure_1_panels/csaw_upset_plot.pdf",
-        "figures/figure_1_panels/kvon_tile_activity.pdf"
+            sample=["gd7", "Tollrm910", "Toll10B"])
     shell: 
         "R -e \"rmarkdown::render('/home/research/vaquerizas/liz/dorsal_ventral/for_paper/scripts/make_candidate_enhancers.Rmd', "
         "output_file='/home/research/vaquerizas/liz/dorsal_ventral/for_paper/scripts/make_candidate_enhancers.html', "
@@ -112,4 +110,35 @@ rule plot_tf_aggregates_microc:
         "--vmin 5e-1 --vmax 2e0 "
         "--enrichment 3 -o {output} {input} "
 
+## Enhancer loops
 
+rule plot_enhancer_loop_aggregates:
+    input:
+        loops = "data/loops/enhancer_enhancer_loops/{loop_set}_enhancer_pairs_same_domain.bedpe",
+        hic = "data/hic/merged/{sample}/hic/{sample}_{res}.hic"
+    output:
+        plot = "figures/plot_enhancer_loop_aggregates/{loop_set}_{sample}_{res}_aggregate.pdf",
+        matrix = "figures/plot_enhancer_loop_aggregates/{loop_set}_{sample}_{res}_aggregate.txt",
+        aggmat = "figures/plot_enhancer_loop_aggregates/{loop_set}_{sample}_{res}_aggregate.hdf5"
+    shell:
+        "fanc aggregate --loops -tmp "
+        "--colormap bwr --vmin -1 --vmax 1 --pixels 30 "
+        "-m {output.matrix} -p {output.plot} "
+        "{input.hic} {input.loops} {output.aggmat}"
+
+
+rule plot_enhancer_loop_aggregates_microc:
+    input:
+        loops = "data/loops/enhancer_enhancer_loops/{loop_set}_enhancer_pairs_same_domain.bedpe",
+        hic = "data/micro-c/merged/{sample}/hic/{sample}_{res}.hic"
+    output:
+        plot = "figures/plot_enhancer_loop_aggregates/{loop_set}_{sample}-micro-c_{res}_aggregate.pdf",
+        matrix = "figures/plot_enhancer_loop_aggregates/{loop_set}_{sample}-micro-c_{res}_aggregate.txt",
+        aggmat = "figures/plot_enhancer_loop_aggregates/{loop_set}_{sample}-micro-c_{res}_aggregate.hdf5"
+    wildcard_constraints:
+        sample = "gd7|control"
+    shell:
+        "fanc aggregate --loops -tmp "
+        "--colormap bwr --vmin -1 --vmax 1 --pixels 30 "
+        "-m {output.matrix} -p {output.plot} "
+        "{input.hic} {input.loops} {output.aggmat}"

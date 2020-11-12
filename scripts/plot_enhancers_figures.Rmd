@@ -24,6 +24,7 @@ library("dplyr")
 library("ggplot2")
 library("heatmaps")
 library("UpSetR")
+library("InteractionSet")
 library("BSgenome.Dmelanogaster.UCSC.dm6")
 Dmel <- Dmelanogaster
 seqlevelsStyle(Dmel) <- "Ensembl"
@@ -1256,6 +1257,70 @@ pe_df %>%
 
 ```
 
+### Constructing enhancer-enhancer 'loops'
+
+I'll construct loops between enhancers that are in the same domain, separately for each set of candidate enhancers.
+
+```{r}
+stop()
+boundaries <- rtracklayer::import.bed("../data/boundaries/3-4h_final_boundaries.bed")
+
+span <- function(gi){
+  GRanges(seqnames = seqnames(anchors(gi, "first")),
+          ranges = IRanges(start = start(anchors(gi, "first")),
+                           end = end(anchors(gi, "second"))))
+}
+
+
+get_same_domain_pairs <- function(enhancers, boundaries){
+  chrs <- unique(seqnames(enhancers))
+
+  interactions <- lapply(chrs, function(chr){
+    chr_peaks <- enhancers[seqnames(enhancers)==chr]
+    index_df <- expand.grid(index1 = 1:length(chr_peaks), 
+                            index2 = 1:length(chr_peaks))
+    index_df <- index_df[index_df$index1 < index_df$index2, ]
+    
+    dists <- distance(chr_peaks[index_df$index1],
+                      chr_peaks[index_df$index2])
+    # index_df <- index_df[dists >= mindist & dists <= maxdist, ]
+    GInteractions(chr_peaks[index_df$index1],
+                  chr_peaks[index_df$index2])
+}) %>% do.call("c", .)
+  
+  message(length(interactions), " enhancer pairs ")
+  ## write interactions separated by a boundary
+  ol_boundary <- countOverlaps(span(interactions), boundaries) > 0
+  return(interactions[!ol_boundary])
+}
+
+gd7_enhancer_pairs <- get_same_domain_pairs(gd7_enhancers, boundaries)
+Tollrm910_enhancer_pairs <- get_same_domain_pairs(Tollrm910_enhancers, boundaries)
+Toll10B_enhancer_pairs <- get_same_domain_pairs(Toll10B_enhancers, boundaries)
+
+gd7_enhancer_pairs[pairdist(gd7_enhancer_pairs) >= 5000] %>% 
+  as.data.frame() %>%
+  mutate(start1 = start1-1, start2 = start2-1) %>%
+  select(seqnames1, start1, end1, seqnames2, start2, end2) %>%
+  write.table("../data/loops/enhancer_enhancer_loops/gd7_enhancer_pairs_same_domain.bedpe",
+              sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+Tollrm910_enhancer_pairs[pairdist(Tollrm910_enhancer_pairs) >= 5000] %>% 
+  as.data.frame() %>%
+  mutate(start1 = start1-1, start2 = start2-1) %>%
+  select(seqnames1, start1, end1, seqnames2, start2, end2) %>%
+  write.table("../data/loops/enhancer_enhancer_loops/Tollrm910_enhancer_pairs_same_domain.bedpe",
+              sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+Toll10B_enhancer_pairs[pairdist(Toll10B_enhancer_pairs) >= 5000] %>% 
+  as.data.frame() %>%
+  mutate(start1 = start1-1, start2 = start2-1) %>%
+  select(seqnames1, start1, end1, seqnames2, start2, end2) %>%
+  write.table("../data/loops/enhancer_enhancer_loops/Toll10B_enhancer_pairs_same_domain.bedpe",
+              sep = "\t", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+
+```
 
 ### Comparing genes to TADs and GRBs
 

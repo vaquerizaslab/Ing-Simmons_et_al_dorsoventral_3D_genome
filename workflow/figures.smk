@@ -49,7 +49,9 @@ rule enhancers_figures:
         expand("data/loops/enhancer_promoter_loops/{loop_set}.bedpe",
          loop_set = ["gd7_csaw_ef_all", "gd7_csaw_ep_all", "Tollrm910_csaw_ef_all", 
                 "Tollrm910_csaw_ep_all", "Toll10B_csaw_ef_all", "Toll10B_csaw_ep_all",
-                "gd7_csaw_pf_all", "Tollrm910_csaw_pf_all", "Toll10B_csaw_pf_all"])
+                "gd7_csaw_pf_all", "Tollrm910_csaw_pf_all", "Toll10B_csaw_pf_all"]),
+        expand("data/loops/enhancer_enhancer_loops/{set}_enhancer_pairs_same_domain.bedpe",
+            set=["gd7", "Tollrm910", "Toll10B"])
     shell:  
         "R -e \"rmarkdown::render('/home/research/vaquerizas/liz/dorsal_ventral/for_paper/scripts/plot_enhancers_figures.Rmd', "
         "output_file='/home/research/vaquerizas/liz/dorsal_ventral/for_paper/scripts/plot_enhancers_figures.html', "
@@ -146,7 +148,7 @@ rule plot_microc_regions:
 	input:
 		"data/micro-c/merged/control/hic/control_{res}.hic"
 	output: 
-		expand("figures/figure_microc_panels/{{res}}/{name}.pdf", 
+		expand("figures/figure_5_panels/{{res}}/{name}.pdf", 
 			name=["twi", "sna", "if", "NetA", "sog", "Doc1", "pnr", "C15"])
 	shell:
 		"python scripts/plot_micro-c_regions.py {wildcards.res} "
@@ -207,7 +209,7 @@ rule plot_schematic:
         hic = "data/micro-c/merged/control/hic/control_500bp.hic",
         enh = "data/supplementary_tables/gd7_candidate_enhancers.bed"
     output:
-        "figures/figure_microc_panels/ep_loop_schematic.pdf"
+        "figures/figure_5_panels/ep_loop_schematic.pdf"
     shell:
         """
         fancplot 3L:9,000,000-9,050,000 -o {output} --width 2 \
