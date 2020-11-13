@@ -158,6 +158,17 @@ rule export_marginals_microc:
     shell: 
         "python scripts/export_marginals.py {input} {output}"
 
+
+rule insulation_score_microc:
+    input: 
+        "data/micro-c/merged/{sample}/hic/{sample}_{res}.hic"
+    output:
+        "data/boundaries/{sample}_{res}_micro-c.ii",
+        expand("data/boundaries/{{sample}}_{{res}}_micro-c_{w}.bw",
+            w = [4, 6, 8, 10])
+    shell: "python scripts/insulation_score_micro-c.py {input}"
+
+
 # rule calculate_resolution:
 #     input:
 #         expand("data/micro-c/merged/{sample}/hic/{sample}_{res}_marginals.bed",

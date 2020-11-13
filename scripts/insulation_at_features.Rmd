@@ -1,0 +1,339 @@
+---
+title: "Insulation comparisons"
+author: "Liz Ing-Simmons"
+date: "13/11/2020"
+output: 
+  html_document:
+    toc: true
+    toc_float: false
+    code_folding: hide
+---
+
+```{r global_options, echo=FALSE}
+knitr::opts_chunk$set(fig.width=6, fig.height=4, dpi = 300, out.width = "60%", dev = c("png"),
+             warning=FALSE, message=FALSE, error = FALSE)
+pdf.options(useDingbats = FALSE)
+```
+
+```{r load_packages, cache = FALSE}
+library("GenomicRanges")
+library("GenomicFeatures")
+library("rtracklayer")
+library("dplyr")
+library("ggplot2")
+library("heatmaps")
+library("BSgenome.Dmelanogaster.UCSC.dm6")
+Dmel <- Dmelanogaster
+seqlevelsStyle(Dmel) <- "Ensembl"
+
+
+colour_scheme <- c(gd7 = "#648FFF", Tollrm910 ="#DC267F", 
+                   Toll10B = "#FFB000", "control" = "black")
+
+basedir <- here::here()
+```
+
+# Load data
+
+## Enhancers
+
+```{r read_enhancers}
+gd7_enhancers <- import.bed(file.path(basedir, "data/supplementary_tables/gd7_candidate_enhancers.bed"))
+Tollrm910_enhancers <- import.bed(file.path(basedir, "data/supplementary_tables/Tollrm910_candidate_enhancers.bed"))
+Toll10B_enhancers <- import.bed(file.path(basedir, "data/supplementary_tables/Toll10B_candidate_enhancers.bed"))
+
+gd7_enhancers$class <- "gd7"
+Tollrm910_enhancers$class <- "Tollrm910"
+Toll10B_enhancers$class <- "Toll10B"
+all_enhancers <- c(gd7_enhancers, Tollrm910_enhancers, Toll10B_enhancers)
+```
+
+## DE genes data
+
+* genes with a log2 fold change of at least 2 in any of the comparison between mutants
+
+```{r get_genes, cache=TRUE}
+transcriptome_gff <- "../../external_data/flybase/dmel-all-r6.30.gtf.gz"
+txdb <- GenomicFeatures::makeTxDbFromGFF(transcriptome_gff)
+k <- AnnotationDbi::keys(txdb, keytype = "TXNAME")
+tx2gene <- AnnotationDbi::select(txdb, keys = k, columns = "GENEID", keytype = "TXNAME")
+
+gene_locations <- AnnotationDbi::select(txdb, keys = k, 
+                                        columns = c("TXCHROM", "TXSTART", "TXEND", "TXSTRAND", "GENEID"), 
+                                        keytype = "TXNAME")
+transcripts_gr <- makeGRangesFromDataFrame(gene_locations, seqnames.field = "TXCHROM",
+                                     start.field = "TXSTART", end.field = "TXEND",
+                                     strand.field = "TXSTRAND", keep.extra.columns = TRUE)
+genes_gr <- genes(txdb)
+```
+
+```{r}
+# genes with a log2FC of at least 2
+de_genes_files <- list.files("../../external_data/koenecke_2016_2017/rnaseq_results/", 
+                             pattern = "padj005_log2foldchange1_results.txt", full.names = TRUE)
+names(de_genes_files) <- gsub("_padj005_log2foldchange1_results.txt", "", basename(de_genes_files))
+
+de_genes_tables <- lapply(de_genes_files, function(f){
+  read.table(f, sep = "\t", header = TRUE)
+  })
+
+for (n in names(de_genes_tables)){
+  mcols(genes_gr)[[n]] <- mcols(genes_gr)$gene_id %in% de_genes_tables[[n]]$gene_id
+}
+
+genes_gr$de_any <- genes_gr$tlrm910_vs_tl10b | genes_gr$gd7_vs_tl10b | genes_gr$gd7_vs_tlrm910
+
+gd7_up_ids <- intersect(filter(de_genes_tables$gd7_vs_tl10b, log2FoldChange > 0) %>%  pull(gene_id),
+                        filter(de_genes_tables$gd7_vs_tlrm910, log2FoldChange > 0) %>%  pull(gene_id))
+gd7_down_ids <- intersect(filter(de_genes_tables$gd7_vs_tl10b, log2FoldChange < 0) %>%  pull(gene_id),
+                        filter(de_genes_tables$gd7_vs_tlrm910, log2FoldChange < 0) %>%  pull(gene_id))
+
+tollrm910_up_ids <- intersect(filter(de_genes_tables$tlrm910_vs_tl10b, log2FoldChange > 0) %>%  pull(gene_id),
+                        filter(de_genes_tables$gd7_vs_tlrm910, log2FoldChange < 0) %>%  pull(gene_id))
+tollrm910_down_ids <- intersect(filter(de_genes_tables$tlrm910_vs_tl10b, log2FoldChange < 0) %>%  pull(gene_id),
+                        filter(de_genes_tables$gd7_vs_tlrm910, log2FoldChange > 0) %>%  pull(gene_id))
+
+toll10B_up_ids <- intersect(filter(de_genes_tables$tlrm910_vs_tl10b, log2FoldChange < 0) %>%  pull(gene_id),
+                        filter(de_genes_tables$gd7_vs_tl10b, log2FoldChange < 0) %>%  pull(gene_id))
+toll10B_down_ids <- intersect(filter(de_genes_tables$tlrm910_vs_tl10b, log2FoldChange > 0) %>%  pull(gene_id),
+                        filter(de_genes_tables$gd7_vs_tl10b, log2FoldChange > 0) %>%  pull(gene_id))
+
+genes_gr$gd7_up <- mcols(genes_gr)$gene_id %in% gd7_up_ids
+genes_gr$gd7_down <- mcols(genes_gr)$gene_id %in% gd7_down_ids
+genes_gr$tollrm910_up <- mcols(genes_gr)$gene_id %in% tollrm910_up_ids
+genes_gr$tollrm910_down <- mcols(genes_gr)$gene_id %in% tollrm910_down_ids
+genes_gr$toll10B_up <- mcols(genes_gr)$gene_id %in% toll10B_up_ids
+genes_gr$toll10B_down <- mcols(genes_gr)$gene_id %in% toll10B_down_ids
+
+genes_gr
+```
+
+## Boundaries
+
+I'll use boundaries called from 3-4h data. 
+
+```{r}
+boundaries <- import.bed(file.path(basedir, "data/boundaries/3-4h_final_boundaries.bed"))
+```
+
+## Insulation
+
+```{r}
+samples <- c("control-nc14", "gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14")
+ins_files <- file.path(basedir, "data", "boundaries", paste0(samples, "_2kb_8.bw")) %>% setNames(samples)
+
+# microc_samples <- c("control", "gd7")
+# microc_ins_files <- file.path(basedir, "data", "boundaries", paste0(microc_samples, "_2kb_micro-c_8.bw")) %>% setNames(microc_samples)
+
+
+ins_cov <- lapply(ins_files, function(f) {
+  tmp <- import.bw(f)
+  tmp$score[is.na(tmp$score)] <- 0 
+  coverage(tmp, weight = "score")
+  })
+names(ins_cov) <- c("control_hic", "gd7_hic", "Tollrm910_hic", "Toll10B_hic")
+```
+
+# Plotting insulation at features of interest
+
+Insulation is at 2kb resolution with a window size of 8 bins (16 kb)
+
+```{r}
+drop_windows <- function(windows, genome){
+  drop_idx <- end(windows) > seqlengths(genome)[as.character(seqnames(windows))] | start(windows) <= 0
+  message("Dropping ", sum(drop_idx), " ranges")
+  return(windows[!drop_idx])
+}
+
+make_heatmap <- function(cov, windows, label= ""){
+  #windows <- drop_windows(resize(windows, width = width, fix = "center"), Dmel)
+  width <- unique(width(windows))
+  if (length(width) > 1) {
+    stop("windows should all be the same size!")
+    }
+  coords <- c(-(width/2), width/2) # each side is half the total width
+  hm <- CoverageHeatmap(windows, cov, coords = coords, label = label)
+  scale_val <- max(abs(quantile(image(hm), c(0.01, 0.99), na.rm = TRUE)))
+  heatmaps::scale(hm) <- c(0, scale_val)
+  return(hm)
+}
+
+summarise_heatmap <- function(hm, groups = 1){
+  df <- as.data.frame(image(hm)) %>%
+    mutate(group = groups) %>% 
+    tibble::rownames_to_column(var = "region") %>% 
+    tidyr::pivot_longer(starts_with("V"), names_to = "xpos", names_prefix = "V") %>%
+    mutate(xpos = as.numeric(xpos), 
+           value = case_when(is.infinite(value) ~ 0, TRUE ~ value)
+           ) %>%
+    group_by(xpos, group) %>% 
+    summarise(mean = mean(value, na.rm = TRUE), sd = sd(value, na.rm = TRUE))
+  return(df)
+}
+
+```
+
+
+```{r }
+boundary_windows <- drop_windows(resize(boundaries, fix = "center", width = 50000), Dmel)
+
+boundary_hm_list <- lapply(names(ins_cov), function(n){
+    make_heatmap(ins_cov[[n]], windows = boundary_windows, label = "")
+    }) %>% setNames(names(ins_cov))
+
+boundary_hm_summary_df <- lapply(boundary_hm_list, summarise_heatmap) %>% 
+  bind_rows(.id = "sample") %>% 
+  tidyr::separate(sample, into = c("genotype", "type"), sep = "_")
+```
+
+
+```{r, fig.height=4, fig.width=4, out.width="100%", }
+boundary_meta_plot <- boundary_hm_summary_df %>%
+  mutate(genotype = case_when(genotype == "tl10b" ~ "Toll10B",
+                              TRUE ~ genotype)) %>% 
+  mutate(genotype = factor(genotype, levels = c("control", "gd7", "Tollrm910", "Toll10B"))) %>% 
+  ggplot(aes(x = xpos, y = mean, ymin = mean - sd, 
+             ymax = mean + sd, colour = genotype, fill = genotype)) +
+  geom_ribbon(alpha = 0.2, colour = NA) +
+  geom_line() +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank()) +
+  # theme(panel.spacing.x = unit(2, "lines")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_colour_manual(values = colour_scheme) +
+  scale_fill_manual(values = colour_scheme) +
+  scale_x_continuous("", breaks = c(0, 25000, 50000), labels = c("-25 kb", "Boundary", "+25 kb")) +
+  scale_y_continuous(limits = c(-0.8, 0.8)) +
+  labs(colour = "Genotype", fill = "Genotype", y = "Insulation score")
+boundary_meta_plot
+```
+
+## Enhancers
+
+
+```{r }
+enhancers_windows <- drop_windows(resize(all_enhancers, fix = "center", width = 50000), Dmel)
+
+enhancers_hm_list <- lapply(names(ins_cov), function(n){
+    make_heatmap(ins_cov[[n]], windows = enhancers_windows, label = "")
+    }) %>% setNames(names(ins_cov))
+
+enhancers_hm_summary_df <- lapply(enhancers_hm_list, summarise_heatmap, groups = enhancers_windows$class) %>% 
+  bind_rows(.id = "sample") %>% 
+  tidyr::separate(sample, into = c("genotype", "type"), sep = "_")
+```
+
+```{r, fig.height=4, fig.width=6, out.width="100%",}
+enhancers_meta_plot <- enhancers_hm_summary_df %>%
+  mutate(genotype = case_when(genotype == "tl10b" ~ "Toll10B",
+                              TRUE ~ genotype)) %>% 
+  mutate(genotype = factor(genotype, levels = c("control", "gd7", "Tollrm910", "Toll10B")),
+         group = factor(group, levels = c("gd7", "Tollrm910", "Toll10B"))) %>% 
+  ggplot(aes(x = xpos, y = mean, ymin = mean - sd, 
+            ymax = mean + sd, colour = genotype, fill = genotype)) +
+  geom_ribbon(alpha = 0.2, colour = NA) +
+  geom_line() +
+  facet_grid(~group) +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank()) +
+  # theme(panel.spacing.x = unit(2, "lines")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_colour_manual(values = colour_scheme) +
+  scale_fill_manual(values = colour_scheme) +
+  scale_x_continuous("", breaks = c(0, 25000, 50000), labels = c("-25 kb", "Enhancer", "+25 kb")) +
+  scale_y_continuous(limits = c(-0.9, 0.9)) +
+  labs(colour = "Genotype", fill = "Genotype", y = "Insulation score")
+enhancers_meta_plot
+```
+
+
+## DE genes
+
+```{r}
+gd7_up <- genes_gr[genes_gr$gd7_up]
+gd7_up$class <- "gd7_up"
+gd7_down <- genes_gr[genes_gr$gd7_down]
+gd7_down$class <- "gd7_down"
+
+tollrm910_up <- genes_gr[genes_gr$tollrm910_up]
+tollrm910_up$class <- "Tollrm910_up"
+tollrm910_down <- genes_gr[genes_gr$tollrm910_down]
+tollrm910_down$class <- "Tollrm910_down"
+
+toll10B_up <- genes_gr[genes_gr$toll10B_up]
+toll10B_up$class <- "Toll10B_up"
+toll10B_down <- genes_gr[genes_gr$toll10B_down]
+toll10B_down$class <- "Toll10B_down"
+
+all_genes <- c(gd7_up, gd7_down, tollrm910_up, tollrm910_down, toll10B_up, toll10B_down)
+all_promoters <- promoters(all_genes)
+
+```
+
+```{r }
+promoters_windows <- drop_windows(resize(all_promoters, fix = "center", width = 50000), Dmel)
+
+promoters_hm_list <- lapply(names(ins_cov), function(n){
+    make_heatmap(ins_cov[[n]], windows = promoters_windows, label = "")
+    }) %>% setNames(names(ins_cov))
+
+promoters_hm_summary_df <- lapply(promoters_hm_list, summarise_heatmap, groups = promoters_windows$class) %>% 
+  bind_rows(.id = "sample") %>% 
+  tidyr::separate(sample, into = c("genotype", "type"), sep = "_")
+```
+
+```{r}
+promoters_meta_plot <- promoters_hm_summary_df %>%
+  mutate(genotype = case_when(genotype == "tl10b" ~ "Toll10B",
+                              TRUE ~ genotype)) %>% 
+  tidyr::separate(group, into = c("group", "direction"), sep = "_") %>% 
+  mutate(genotype = factor(genotype, levels = c("control", "gd7", "Tollrm910", "Toll10B")),
+         group = factor(group, levels = c("gd7", "Tollrm910", "Toll10B")),
+         diretion = factor(direction, levels = c("down", "up"))) %>% 
+  ggplot(aes(x = xpos, y = mean, ymin = mean - sd, 
+            ymax = mean + sd, colour = genotype, fill = genotype)) +
+  geom_ribbon(alpha = 0.2, colour = NA) +
+  geom_line() +
+  facet_grid(direction~group) +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank()) +
+  # theme(panel.spacing.x = unit(2, "lines")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  scale_colour_manual(values = colour_scheme) +
+  scale_fill_manual(values = colour_scheme) +
+  scale_x_continuous("", breaks = c(0, 25000, 50000), labels = c("-25 kb", "TSS", "+25 kb")) +
+  scale_y_continuous(limits = c(-0.8, 0.8)) +
+  labs(colour = "Genotype", fill = "Genotype", y = "Insulation score")
+promoters_meta_plot
+```
+
+
+# Combined plots
+
+```{r fig.width=4, fig.height=6}
+legend <- cowplot::get_legend(boundary_meta_plot)
+
+top <- cowplot::plot_grid(boundary_meta_plot + theme(legend.position = "none"),
+                                      legend, rel_widths = c(1, 1.5))
+bottom <- cowplot::plot_grid(enhancers_meta_plot + theme(legend.position = "none"), 
+                   promoters_meta_plot + theme(legend.position = "none"),
+                   nrow = 2, rel_heights = c(1, 1.5), align = "hv", axis = "lr")
+p <- cowplot::plot_grid(top, bottom, rel_heights = c(1, 2.5), nrow = 2, align = "hv", axis = "l")
+p
+
+pdf(file = file.path(basedir, "figures", "insulation", "insulation_composite_fig.pdf"),
+    width = 4, height = 6)
+p
+dev.off()
+```
+
+
+## Session info
+
+This report was generated at `r format(Sys.time(), "%X, %a %b %d %Y")`. 
+
+```{r}
+devtools::session_info()
+```
+
+

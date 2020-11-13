@@ -162,6 +162,8 @@ rule all:
             sample=["gd7", "control"], res=["10kb", "5kb", "2kb", "1kb", "500bp", "100bp"]),
         expand("data/micro-c/merged/{sample}/hic/{sample}_{res}_expected_values_per_chrom.txt",
             sample=["gd7", "control"], res=["10kb", "5kb", "2kb", "1kb", "500bp", "100bp"]),
+        expand("data/boundaries/{sample}_{res}_micro-c_{w}.bw",
+            w = [4, 6, 8, 10], sample=["gd7", "control"], res=["2kb", "5kb"]),
 ###################
 # FASTQ DATA QC
 ###################
