@@ -1,0 +1,651 @@
+---
+title: "Differential expression analysis"
+author: "Liz Ing-Simmons"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r global_options, echo=FALSE}
+knitr::opts_chunk$set(fig.width=6, fig.height=4, dpi = 300, out.width = "60%",
+             warning=FALSE, message=FALSE, error= FALSE)
+pdf.options(useDingbats = FALSE)
+options(stringsAsFactors = FALSE)
+
+set.seed(20190322)
+
+padj_threshold <- 0.05
+log2fc_threshold <- 2
+
+colour_scheme <- c("#648FFF", "#785EF0", "#DC267F", "#FE6100", "#FFB000")
+colour_scheme <- c("#648FFF", "#DC267F", "#FFB000")
+
+key_genes <- read.table("../../key_genes.txt", header = TRUE, sep = "\t")
+```
+
+```{r load_packages, cache = FALSE}
+library("AnnotationHub")
+library("ensembldb")
+library("tximport")
+library("DESeq2")
+library("pheatmap")
+library("ggplot2")
+library("dplyr")
+library("DT")
+library("org.Dm.eg.db")
+library("clusterProfiler")
+library("readxl")
+library("GenomicRanges")
+library("rtracklayer")
+
+dm3_to_dm6_chain <- import.chain("../../dm3ToDm6.over.chain")
+```
+
+```{r functions}
+## modified from DESeq2 source code
+plotPCA_custom <- function(object, intgroup="condition", ntop=500, returnData=FALSE)
+{
+  # calculate the variance for each gene
+  rv <- rowVars(assay(object))
+  
+  # select the ntop genes by variance
+  select <- order(rv, decreasing=TRUE)[seq_len(min(ntop, length(rv)))]
+  
+  # perform a PCA on the data in assay(x) for the selected genes
+  pca <- prcomp(t(assay(object)[select,]))
+  
+  # the contribution to the total variance for each component
+  percentVar <- pca$sdev^2 / sum( pca$sdev^2 )
+  
+  if (!all(intgroup %in% names(colData(object)))) {
+    stop("the argument 'intgroup' should specify columns of colData(dds)")
+  }
+  
+  intgroup.df <- as.data.frame(colData(object)[, intgroup, drop=FALSE])
+  
+  # add the intgroup factors together to create a new grouping factor
+  group <- if (length(intgroup) > 1) {
+    factor(apply( intgroup.df, 1, paste, collapse=":"))
+  } else {
+    colData(object)[[intgroup]]
+  }
+  
+  # assembly the data for the plot
+  d <- data.frame(PC1=pca$x[,1], PC2=pca$x[,2], PC3=pca$x[,3], PC4=pca$x[,4],
+                  group=group, intgroup.df, name=colnames(object))
+  
+  if (returnData) {
+    attr(d, "percentVar") <- percentVar[1:4]
+    return(d)
+  }
+  
+  ggplot(data=d, aes_string(x="PC1", y="PC2", color="group")) + geom_point(size=3) + 
+    xlab(paste0("PC1: ",round(percentVar[1] * 100),"% variance")) +
+    ylab(paste0("PC2: ",round(percentVar[2] * 100),"% variance")) +
+    coord_fixed()
+}
+
+
+```
+
+
+```{r get_metadata}
+datadir <- ".."
+metadata <- readr::read_tsv(file.path(datadir, "rnaseq_metadata.txt")) %>%
+  mutate(sample_name = paste(genotype_variation, replicate, sep = "_Rep"))
+```
+
+## Background
+
+I have RNA-seq data from the samples described in the above image. I've used Salmon (version 0.14.1; with `--seqBias` option) to quantify expression of transcripts from dm6 (6.22). Here I'll import these quantifications and summarise them at gene level, and then perform differential gene  expression analysis. 
+
+```{r get_genes, cache=TRUE}
+# transcriptome_gff <- "/home/research/vaquerizas/store/genomes/insects/Dmel/6.22/gtf/Drosophila_melanogaster.BDGP6.22.97.gtf.gz"
+transcriptome_gff <- "../../flybase/dmel-all-r6.30.gtf.gz"
+txdb <- GenomicFeatures::makeTxDbFromGFF(transcriptome_gff)
+k <- keys(txdb, keytype = "TXNAME")
+tx2gene <- AnnotationDbi::select(txdb, keys = k, columns = "GENEID", keytype = "TXNAME")
+
+gene_locations <- AnnotationDbi::select(txdb, keys = k, 
+                                        columns = c("TXCHROM", "TXSTART", "TXEND", "TXSTRAND", "GENEID"), 
+                                        keytype = "TXNAME")
+
+
+gene_names <- rtracklayer::import.gff(transcriptome_gff) %>%
+  as.data.frame() %>%
+  dplyr::filter(type == "gene") %>%
+  dplyr::select(gene_id, gene_symbol)
+```
+
+```{r read_quants, cache=TRUE}
+files <- file.path(datadir, "rnaseq_quantifications", 
+                   metadata$sample_name, "quant.sf")
+names(files) <- metadata$sample_name
+
+txi <- tximport(files, type = "salmon", tx2gene = tx2gene)
+```
+
+The `tximport` package imports the quantifications at transcript level and produces gene-level estimated counts. `DESeq2` uses these and the transcript-level abundance estimates to calculate a gene-level offset that corrects for changes to the average transcript length across samples (i.e., from different isoform usage).
+
+```{r deseq, cache=TRUE}
+sampleTable <- data.frame(condition = metadata$genotype_variation,
+                          replicate = metadata$replicate)
+rownames(sampleTable) <- colnames(txi$counts)
+dds <- DESeqDataSetFromTximport(txi, sampleTable, ~1) # just for visualisation, no statistical testing!
+
+```
+
+```{r transform_data, cache=TRUE}
+transformed_data <- vst(dds, blind=FALSE)
+```
+
+## Sample clustering {.tabset}
+
+For visualisation purposes, I'm using the variance stabilising transformation to transform the estimated counts. 
+
+### Hierarchical clustering
+
+```{r cluster_samples, cache=TRUE, dependson="transform_data"}
+sampleDists <- dist(t(assay(transformed_data)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- colnames(transformed_data)
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(RColorBrewer::brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+```
+
+### PC1 vs. PC2
+
+```{r plot_pca, cache=TRUE, dependson="transform_data"}
+pcaData <- plotPCA_custom(transformed_data, 
+                          intgroup=c("condition", "replicate"), 
+                          returnData=TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+```
+
+
+```{r plot_pca2, cache=TRUE, dependson="transform_data2"}
+ggplot(pcaData, aes(PC1, PC2, color=condition)) +
+  geom_point(size=3, alpha = 0.8) +
+  xlab(paste0("PC1: ", percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ", percentVar[2],"% variance")) + 
+  coord_fixed() +
+  theme_bw() +
+  scale_colour_manual(values = colour_scheme)
+```
+
+### PC1 vs. PC3
+
+```{r}
+
+ggplot(pcaData, aes(PC1, PC3, color=condition)) +
+  geom_point(size=3, alpha = 0.8) +
+  xlab(paste0("PC1: ", percentVar[1],"% variance")) +
+  ylab(paste0("PC3: ", percentVar[3],"% variance")) +
+  coord_fixed() +
+  theme_bw() +
+  scale_colour_manual(values = colour_scheme)
+```
+
+### PC2 vs. PC3
+
+```{r}
+
+ggplot(pcaData, aes(PC2, PC3, color=condition)) +
+  geom_point(size=3, alpha = 0.8) +
+  xlab(paste0("PC2: ", percentVar[2],"% variance")) +
+  ylab(paste0("PC3: ", percentVar[3],"% variance")) +
+  coord_fixed() +
+  theme_bw() +
+  scale_colour_manual(values = colour_scheme)
+```
+
+## Determining a threshold for gene expression
+
+In order to later use only "expressed" genes for downstream analysis, I'll use the RNA-seq data to determine a threshold for expression. The `txi` object contains estimated gene-level TPMs.
+
+TPM >= 1 seems like a reasonable cutoff to define expressed genes...
+
+```{r}
+expr_df <- as.data.frame(txi$abundance) %>% 
+  tibble::rownames_to_column("gene_id") %>% 
+  tidyr::pivot_longer(-gene_id, names_to = "sample", values_to = "expr") %>% 
+  tidyr::separate(sample, sep = "_Rep", into = c("genotype", "replicate"))
+
+ggplot(expr_df, aes(x = expr, colour = genotype, linetype = replicate)) +
+  geom_density() +
+  scale_x_log10(breaks = c(0.01, 0.1, 1, 10, 100, 1000, 10000), 
+                labels = c(0.01, 0.1, 1, 10, 100, 1000, 10000)) +
+  scale_colour_manual(values = colour_scheme) + 
+  geom_vline(xintercept = 1, linetype = 2) +
+  theme_bw()
+
+expr_df %>% 
+  group_by(genotype, replicate) %>% 
+  summarise(n_expressed = sum(expr >= 1),
+            percent_expressed = signif(100*n_expressed/n(), 3))
+
+as.data.frame(txi$abundance) %>% 
+  tibble::rownames_to_column("gene_id") %>% 
+  write.table(file = file.path(datadir, "rnaseq_results", "txi_tpm_table.txt"), 
+              col.names = TRUE, row.names = FALSE, sep = "\t", quote = FALSE)
+```
+
+## Differential expression {.tabset}
+
+I willl perform differential expression analysis between each pair of genotypes:
+
+* gd7 vs Tollrm9/10
+* gd7 vs Toll10B
+* Tollrm9/10 vs Toll 10B
+
+```{r calc_results, cache=TRUE}
+dds <- DESeqDataSetFromTximport(txi, sampleTable, ~ condition)
+
+dds <- DESeq(dds)
+
+comparisons <- list("gd7_vs_tlrm910" = c("condition", "gd7", "tlrm910"), # changed, then reference sample
+                    "gd7_vs_tl10b" = c("condition", "gd7", "tl10b"),
+                    "tlrm910_vs_tl10b" = c("condition", "tlrm910", "tl10b"))
+
+res_list <- lapply(comparisons, function(comparison){
+    results(dds, contrast = comparison)
+})
+names(res_list) <- names(comparisons)
+
+# lapply(res_list, summary)
+
+res_df_list <- lapply(res_list, function(x) {
+  tibble::rownames_to_column(as.data.frame(x), var = "gene_id")
+  })
+names(res_df_list) <- names(comparisons)
+
+lfc_res_list <- lapply(comparisons, function(comparison){
+    lfcShrink(dds, contrast = comparison, type = "normal") %>%
+    as.data.frame() %>%
+    tibble::rownames_to_column(var = "gene_id")
+})
+names(lfc_res_list) <- names(comparisons) 
+
+```
+
+
+```{r results_summary, cache=TRUE, dependson="calc_results"}
+summarise_res <- function(df){
+  df %>% 
+    mutate(direction = ifelse(log2FoldChange > 0, "up", "down")) %>%
+    group_by(direction) %>%
+    dplyr::count()
+} 
+
+purrr::map_dfr(lfc_res_list, .id = "comparison", 
+               .f = ~ .x %>% dplyr::filter(padj < padj_threshold) %>% summarise_res()) %>%
+  tidyr::spread(direction, value = n) %>%
+  knitr::kable(caption = paste("Genes with adjusted p value <", padj_threshold))
+
+purrr::map_dfr(lfc_res_list, .id = "comparison", 
+               .f = ~ .x %>% dplyr::filter(padj < padj_threshold, abs(log2FoldChange) > log2fc_threshold) %>% 
+                 summarise_res()) %>%
+  tidyr::spread(direction, value = n) %>%
+  knitr::kable(caption = paste("Genes with adjusted p value <", padj_threshold, "and an absolute log2 fold change >", log2fc_threshold))
+```
+
+I've used log-fold change shrinkage (original DESEq2 method) to estimate the expression fold changes for better visualisation and ranking of genes by log2 fold change.
+
+```{r plot_de, cache=TRUE, dependson="calc_results"}
+tx2gene_df <- as.data.frame(tx2gene) %>% 
+  left_join(gene_names, by = c("GENEID" = "gene_id")) %>%
+  dplyr::select(gene_id = "GENEID", gene_symbol) %>%
+  unique()
+```
+
+### gd7_vs_tlrm910
+
+
+```{r out.width= "80%"}
+lfc_res_list$gd7_vs_tlrm910 %>%
+  left_join(tx2gene_df, by = "gene_id") %>%
+  left_join(key_genes) %>%
+  mutate(label = case_when(gene_id %in% key_genes$gene_id ~ gene_symbol,
+                           TRUE ~ "")) %>%
+  mutate(signif = padj < padj_threshold) %>%
+  mutate(signif = case_when(is.na(signif) ~ "FALSE",
+                            TRUE ~ as.character(signif))) %>%
+  dplyr::filter(baseMean > 0) %>%
+  ggplot(aes(x = baseMean, y = log2FoldChange, fill = signif, label = label)) +
+  geom_point(size = 1, shape = 21, stroke = 0) +
+  scale_x_log10() +
+  scale_fill_manual(values = c("grey", "black")) +
+  theme_bw() +
+  ggrepel::geom_text_repel(aes(colour = expressed_in), min.segment.length = unit(0, 'lines'), segment.colour = "black") +
+  scale_colour_manual(values = colour_scheme) +
+  labs(y = "log2FoldChange(gd7 / Tollrm910)")
+
+```
+
+The table below shows all genes differentially expressed at an adjusted p value < `r padj_threshold` and an absolute log2 fold change of more than `r log2fc_threshold`. 
+
+```{r, results="asis", cache=FALSE}
+lfc_res_list$gd7_vs_tlrm910 %>%
+  left_join(tx2gene_df, by = "gene_id") %>%
+  dplyr::select(gene_symbol, gene_id, log2FoldChange, padj, baseMean) %>%
+  dplyr::filter(padj < padj_threshold, abs(log2FoldChange) > log2fc_threshold) %>%
+  arrange(padj) %>%
+  DT::datatable(colnames = c("Gene name" = "gene_symbol",
+                             "Flybase gene ID" = "gene_id",
+                             "Estimated log2 fold change" = "log2FoldChange",
+                             "Adjusted p value" = "padj",
+                             "Mean expression" = "baseMean"))
+```
+
+The table below shows genes differentially expressed at an adjusted p value < `r padj_threshold` and an absolute log2 fold change of more than `r 5`. 
+
+```{r, results="asis", cache=FALSE}
+lfc_res_list$gd7_vs_tlrm910 %>%
+  left_join(tx2gene_df, by = "gene_id") %>%
+  dplyr::select(gene_symbol, gene_id, log2FoldChange, padj, baseMean) %>%
+  dplyr::filter(padj < padj_threshold, abs(log2FoldChange) > 5) %>%
+  arrange(padj) %>%
+  DT::datatable(colnames = c("Gene name" = "gene_symbol",
+                             "Flybase gene ID" = "gene_id",
+                             "Estimated log2 fold change" = "log2FoldChange",
+                             "Adjusted p value" = "padj",
+                             "Mean expression" = "baseMean")) %>%
+  formatRound(columns=c("Estimated log2 fold change", "Mean expression"), digits = 2) %>%
+  formatSignif(columns = "Adjusted p value", digits = 2)
+```
+
+### gd7_vs_tl10b
+
+
+```{r out.width= "80%"}
+lfc_res_list$gd7_vs_tl10b %>%
+  left_join(tx2gene_df, by = "gene_id") %>%
+  left_join(key_genes) %>%
+  mutate(label = case_when(gene_id %in% key_genes$gene_id ~ gene_symbol,
+                           TRUE ~ "")) %>%
+  mutate(signif = padj < padj_threshold) %>%
+  mutate(signif = case_when(is.na(signif) ~ "FALSE",
+                            TRUE ~ as.character(signif))) %>%
+  dplyr::filter(baseMean > 0) %>%
+  ggplot(aes(x = baseMean, y = log2FoldChange, fill = signif, label = label)) +
+  geom_point(size = 1, shape = 21, stroke = 0) +
+  scale_x_log10() +
+  scale_fill_manual(values = c("grey", "black")) +
+  theme_bw() +
+  ggrepel::geom_text_repel(aes(colour = expressed_in), min.segment.length = unit(0, 'lines'), segment.colour = "black") +
+  scale_colour_manual(values = colour_scheme) +
+  labs(y = "log2FoldChange(gd7 / Toll10B)")
+```
+
+The table below shows all genes differentially expressed at an adjusted p value < `r padj_threshold` and an absolute log2 fold change of more than `r log2fc_threshold`. 
+
+```{r results="asis", cache=FALSE}
+lfc_res_list$gd7_vs_tl10b %>%
+  left_join(tx2gene_df, by = "gene_id") %>%
+  dplyr::select(gene_symbol, gene_id, log2FoldChange, padj, baseMean) %>%
+  dplyr::filter(padj < padj_threshold, abs(log2FoldChange) > log2fc_threshold) %>%
+  arrange(padj) %>%
+  DT::datatable(colnames = c("Gene name" = "gene_symbol",
+                             "Flybase gene ID" = "gene_id",
+                             "Estimated log2 fold change" = "log2FoldChange",
+                             "Adjusted p value" = "padj",
+                             "Mean expression" = "baseMean"))
+  
+```
+
+The table below shows genes differentially expressed at an adjusted p value < `r padj_threshold` and an absolute log2 fold change of more than `r 5`. 
+
+```{r, results="asis", cache=FALSE}
+lfc_res_list$gd7_vs_tl10b %>%
+  left_join(tx2gene_df, by = "gene_id") %>%
+  dplyr::select(gene_symbol, gene_id, log2FoldChange, padj, baseMean) %>%
+  dplyr::filter(padj < padj_threshold, abs(log2FoldChange) > 5) %>%
+  arrange(padj) %>%
+  DT::datatable(colnames = c("Gene name" = "gene_symbol",
+                             "Flybase gene ID" = "gene_id",
+                             "Estimated log2 fold change" = "log2FoldChange",
+                             "Adjusted p value" = "padj",
+                             "Mean expression" = "baseMean")) %>%
+  formatRound(columns=c("Estimated log2 fold change", "Mean expression"), digits = 2) %>%
+  formatSignif(columns = "Adjusted p value", digits = 2)
+```
+
+### tlrm910_vs_tl10b
+
+```{r out.width= "80%"}
+lfc_res_list$tlrm910_vs_tl10b %>%
+  left_join(tx2gene_df, by = "gene_id") %>%
+  left_join(key_genes) %>%
+  mutate(label = case_when(gene_id %in% key_genes$gene_id ~ gene_symbol,
+                           TRUE ~ "")) %>%
+  mutate(signif = padj < padj_threshold) %>%
+  mutate(signif = case_when(is.na(signif) ~ "FALSE",
+                            TRUE ~ as.character(signif))) %>%
+  dplyr::filter(baseMean > 0) %>%
+  ggplot(aes(x = baseMean, y = log2FoldChange, fill = signif, label = label)) +
+  geom_point(size = 1, shape = 21, stroke = 0) +
+  scale_x_log10() +
+  scale_fill_manual(values = c("grey", "black")) +
+  theme_bw() +
+  ggrepel::geom_text_repel(aes(colour = expressed_in), min.segment.length = unit(0, 'lines'), segment.colour = "black") +
+  scale_colour_manual(values = colour_scheme) +
+  labs(y = "log2FoldChange(Tollrm910 / Toll10B)")
+```
+
+The table below shows all genes differentially expressed at an adjusted p value < `r padj_threshold` and an absolute log2 fold change of more than `r log2fc_threshold`. 
+
+```{r, results="asis", cache=FALSE}
+lfc_res_list$tlrm910_vs_tl10b %>%
+  left_join(tx2gene_df, by = "gene_id") %>%
+  dplyr::select(gene_symbol, gene_id, log2FoldChange, padj, baseMean) %>%
+  dplyr::filter(padj < padj_threshold, abs(log2FoldChange) > log2fc_threshold) %>%
+  arrange(padj) %>%
+  DT::datatable(colnames = c("Gene name" = "gene_symbol",
+                             "Flybase gene ID" = "gene_id",
+                             "Estimated log2 fold change" = "log2FoldChange",
+                             "Adjusted p value" = "padj",
+                             "Mean expression" = "baseMean"))
+  
+```
+
+
+The table below shows genes differentially expressed at an adjusted p value < `r padj_threshold` and an absolute log2 fold change of more than `r 5`. 
+
+```{r, results="asis", cache=FALSE}
+lfc_res_list$tlrm910_vs_tl10b %>%
+  left_join(tx2gene_df, by = "gene_id") %>%
+  dplyr::select(gene_symbol, gene_id, log2FoldChange, padj, baseMean) %>%
+  dplyr::filter(padj < padj_threshold, abs(log2FoldChange) > 5) %>%
+  arrange(padj) %>%
+  DT::datatable(colnames = c("Gene name" = "gene_symbol",
+                             "Flybase gene ID" = "gene_id",
+                             "Estimated log2 fold change" = "log2FoldChange",
+                             "Adjusted p value" = "padj",
+                             "Mean expression" = "baseMean")) %>%
+  formatRound(columns=c("Estimated log2 fold change", "Mean expression"), digits = 2) %>%
+  formatSignif(columns = "Adjusted p value", digits = 2)
+```
+
+I'll write the significantly differentially expressed genes (adjusted p value < `r padj_threshold`) to text files for downstream analysis purposes. Here I'm also outputting the shrunken log2 fold change estimates. 
+
+```{r write_results, cache=TRUE, dependson="calc_results"}
+tmp_list <- lapply(names(res_df_list), function(n){
+  lfc_res_list[[n]] %>%
+  left_join(tx2gene_df, by = "gene_id") %>%
+  write.table(file = file.path(datadir, "rnaseq_results", paste0(n, "_all_results.txt")),
+              sep = "\t", row.names = FALSE, col.names = TRUE)
+  
+  lfc_res_list[[n]] %>%
+    left_join(tx2gene_df, by = "gene_id") %>%
+    dplyr::filter(padj < 0.05) %>%
+    write.table(file = file.path(datadir, "rnaseq_results", paste0(n, "_padj005_results.txt")),
+              sep = "\t", row.names = FALSE, col.names = TRUE)
+  
+  lfc_res_list[[n]] %>%
+    left_join(tx2gene_df, by = "gene_id") %>%
+    dplyr::filter(padj < 0.05, abs(log2FoldChange) > 2) %>%
+    write.table(file = file.path(datadir, "rnaseq_results", paste0(n, "_padj005_log2foldchange2_results.txt")),
+              sep = "\t", row.names = FALSE, col.names = TRUE)
+})
+
+
+
+```
+
+From here onwards I'm only considering genes which have an adjusted p value < `r padj_threshold`, and an absolute (shrunken) log2 fold change > `log2fc_threshold` as my set of significantly differentially expressed genes.
+
+## Gene Ontology enrichment analysis {.tabset}
+
+I'll perform a basic Gene Ontology (GO) enrichment analysis, using the `enrichGO` function from the `clusterProfiler` package. Here I look for terms enriched in up- and down-regulated genes from each pairwise comparison of interest.
+
+BP: biological process; MF: molecular function; CC: cellular component.
+
+```{r get_go_results, cache = TRUE, dependson="get_deseq_results"}
+get_go_enrich <- function(df, padj_threshold = 0.1, log2fc_threshold = 1){
+  universe <- df %>% pull(gene_id)
+  ontologies <- c("MF", "BP", "CC")
+
+  genes <- df %>% dplyr::filter(padj < padj_threshold, 
+                                log2FoldChange > log2fc_threshold) %>% 
+    pull(gene_id)
+  message("Up: ", length(genes), " genes")
+  
+  up <- lapply(ontologies, function(ont){
+    message(ont)
+    res <- enrichGO(gene = genes, 
+             universe = universe,
+             keyType = "ENSEMBL",
+             OrgDb = org.Dm.eg.db,
+             ont = ont,
+             qvalueCutoff = 0.1)
+    simplified <- clusterProfiler::simplify(res,
+                                            cutoff = 0.7,
+                                            by = "p.adjust",
+                                            measure = "Wang")
+    return(as.data.frame(simplified))
+    # return(as.data.frame(res))
+  }) %>% setNames(ontologies) %>% bind_rows(.id = "ontology")
+  
+  genes <- df %>% dplyr::filter(padj < padj_threshold, 
+                                log2FoldChange < -log2fc_threshold) %>% 
+    pull(gene_id)
+   message("Down: ", length(genes), " genes")
+   
+  down <- lapply(ontologies, function(ont){
+    message(ont)
+    res <- enrichGO(gene = genes, 
+             universe = universe,
+             keyType = "ENSEMBL",
+             OrgDb = org.Dm.eg.db,
+             ont = ont,
+             qvalueCutoff = 0.1)
+    simplified <- clusterProfiler::simplify(res,
+                                            cutoff = 0.7,
+                                            by = "p.adjust",
+                                            measure = "Wang")
+    return(as.data.frame(simplified))
+    # return(as.data.frame(res))
+  }) %>% setNames(ontologies) %>% bind_rows(.id = "ontology")
+  
+  return(bind_rows(up = up, down = down, .id = "direction"))
+}
+
+go_enrich_res_list <- purrr::map(res_df_list, get_go_enrich, 
+                                 padj_threshold = padj_threshold, log2fc_threshold = log2fc_threshold)
+go_enrich_res <- go_enrich_res_list %>% bind_rows(.id = "comparison")
+```
+
+```{r plot_go_results, fig.width = 8, out.width="100%"}
+plot_go <- function(df){
+  title <- paste0(gsub("_vs_", " vs. ", unique(df$comparison)), ": ", unique(df$direction))
+  p <- df %>%
+    group_by(ontology, direction) %>%
+    top_n(10, -p.adjust) %>%
+    ungroup() %>%
+    dplyr::filter(p.adjust < 0.05) %>%
+    arrange(p.adjust) %>%
+    mutate(Description = factor(Description, levels = unique(Description))) %>%
+    ggplot(aes(x = Description, y = -log10(p.adjust), fill = ontology)) +
+    geom_col() +
+    theme_bw() +
+    coord_flip() +
+    labs(x = "", y = "-log10(adjusted p value)", fill = "", title = "") +
+    # scale_x_discrete(labels = function(x) stringr::str_wrap(x, width = 60)) +
+    scale_fill_manual(values = c("dodgerblue2", "goldenrod1", "grey50"))
+  cowplot::ggdraw(p) + cowplot::draw_text(title, x = 0.01, y = 0.98, 
+                                          hjust = 0, vjust = 1)
+}
+
+go_enrich_res <- go_enrich_res %>%
+  tidyr::separate(GeneRatio, into = c("num", "out_of"), convert = TRUE) %>%
+  mutate(GeneRatio = num/out_of) %>%
+  dplyr::select(-num, -out_of)
+
+go_plots <- go_enrich_res %>%
+  mutate(comparison = forcats::fct_relevel(comparison, names(res_df_list))) %>%
+  group_by(comparison, direction) %>%
+  group_split() %>%
+  purrr::map(plot_go)
+```
+
+### gd7_vs_tlrm910
+
+```{r plot_go_results2, fig.width = 8, out.width="100%"}
+go_plots[[1]]
+go_plots[[2]]
+```
+
+### gd7_vs_tl10b
+
+```{r plot_go_results3, fig.width = 8, out.width="100%"}
+go_plots[[3]]
+go_plots[[4]]
+```
+
+### tlrm910_vs_tl10b
+
+```{r plot_go_results4, fig.width = 8, out.width="100%"}
+go_plots[[5]]
+go_plots[[6]]
+```
+
+### Searchable table of genes associated with top GO terms
+
+The table below contains genes associated with the top ten GO terms (by adjusted p value) for each comparison, direction of differential gene expression, and ontology. Warning: this is a large table so interaction will be slow. 
+
+```{r get_top_terms_genes}
+terms_genes_table <- go_enrich_res %>% 
+  group_by(comparison, ontology, direction) %>%
+  top_n(10, -p.adjust) %>%
+  tidyr::separate_rows(geneID, sep= "/") %>%
+  left_join(gene_names, by = c("geneID" = "gene_id")) %>%
+  dplyr::select(Description, ID, gene_symbol, "gene_id" = "geneID",  ontology, comparison, direction) 
+
+terms_genes_table %>%
+  DT::datatable(filter = "top")
+
+terms_genes_table %>%
+  write.table(file = file.path(datadir, "rnaseq_results", "top_go_terms_genes.txt"),
+              sep = "\t", row.names = FALSE, col.names = TRUE)
+```
+
+## Conclusions
+
+```{r save_r_objects}
+saveRDS(res_df_list, file.path(datadir, "rnaseq_results", "res_df_list.rds"))
+saveRDS(dds, file.path(datadir, "rnaseq_results", "dds.RDS"))
+```
+
+## Session info
+
+This report was generated at `r format(Sys.time(), "%X, %a %b %d %Y")`. 
+
+```{r}
+devtools::session_info()
+```

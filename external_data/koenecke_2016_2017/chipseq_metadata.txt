@@ -1,0 +1,34 @@
+Assay_Type	AvgSpotLen	LibraryLayout	Run	SRA_Sample	Sample_Name	chip_antibody	antibody	genotype_variation	replicate	developmental_stage
+ChIP-Seq	40	SINGLE	SRR2031907	SRS939890	GSM1689690	Custom GenScript Dl (aa 39-346) 126740-44	Dl	tl10b	1	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031908	SRS939889	GSM1689691	Custom GenScript Dl (aa 39-346) 126740-44	Dl	tl10b	2	2-4 hr after egg deposition
+ChIP-Seq	45	SINGLE	SRR2031888	SRS939905	GSM1689671	"H3K27ac (Active Motif Carlsbad, CA, catalog #39133)"	H3K27ac	gd7	1	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031889	SRS939874	GSM1689672	"H3K27ac (Active Motif Carlsbad, CA, catalog #39133)"	H3K27ac	gd7	2	2-4 hr after egg deposition
+ChIP-Seq	33	SINGLE	SRR2031909	SRS939888	GSM1689692	"H3K27ac (Active Motif Carlsbad, CA, catalog #39133)"	H3K27ac	tl10b	1	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031910	SRS939887	GSM1689693	"H3K27ac (Active Motif Carlsbad, CA, catalog #39133)"	H3K27ac	tl10b	2	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031891	SRS939901	GSM1689674	"H3K27me3 (Active Motif Carlsbad, CA, catalog #39155)"	H3K27me3	gd7	1	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031890	SRS939902	GSM1689673	"H3K27me3 (Active Motif Carlsbad, CA, catalog #39155)"	H3K27me3	gd7	2	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031911	SRS939885	GSM1689694	"H3K27me3 (Active Motif Carlsbad, CA, catalog #39155)"	H3K27me3	tl10b	1	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031912	SRS939886	GSM1689695	"H3K27me3 (Active Motif Carlsbad, CA, catalog #39155)"	H3K27me3	tl10b	2	2-4 hr after egg deposition
+ChIP-Seq	40	SINGLE	SRR2031892	SRS939875	GSM1689675	"H3K4me1 (Active Motif Carlsbad, CA, catalog #39635)"	H3K4me1	gd7	1	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031893	SRS939906	GSM1689676	"H3K4me1 (Active Motif Carlsbad, CA, catalog #39635)"	H3K4me1	gd7	2	2-4 hr after egg deposition
+ChIP-Seq	45	SINGLE	SRR2031913	SRS939884	GSM1689696	"H3K4me1 (Active Motif Carlsbad, CA, catalog #39635)"	H3K4me1	tl10b	1	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031914	SRS939883	GSM1689697	"H3K4me1 (Active Motif Carlsbad, CA, catalog #39635)"	H3K4me1	tl10b	2	2-4 hr after egg deposition
+ChIP-Seq	33	SINGLE	SRR2031896	SRS939896	GSM1689679	none	input	gd7	1	2-4 hr after egg deposition
+ChIP-Seq	33	SINGLE	SRR2031897	SRS939899	GSM1689680	none	input	gd7	2	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031898	SRS939898	GSM1689681	none	input	gd7	3	2-4 hr after egg deposition
+ChIP-Seq	45	SINGLE	SRR2031917	SRS939882	GSM1689700	none	input	tl10b	1	2-4 hr after egg deposition
+ChIP-Seq	33	SINGLE	SRR2031918	SRS939881	GSM1689701	none	input	tl10b	2	2-4 hr after egg deposition
+ChIP-Seq	33	SINGLE	SRR2031919	SRS939878	GSM1689702	none	input	tl10b	3	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031920	SRS939876	GSM1689703	none	input	tl10b	4	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031906	SRS939891	GSM1689689	none	input	wild type	1	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031894	SRS939904	GSM1689677	Custom GenScript Mad (aa 147-455)	Mad	gd7	1	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031895	SRS939903	GSM1689678	Custom GenScript Mad (aa 147-455)	Mad	gd7	2	2-4 hr after egg deposition
+ChIP-Seq	45	SINGLE	SRR2031904	SRS939893	GSM1689687	"Pc (d-220) (Santa Cruz, catalog #sc-25762)"	Pc	wild type	1	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031905	SRS939892	GSM1689688	Custom GenScript Sna (Full length) 134626-2	Sna	wild type	1	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031903	SRS939895	GSM1689686	Custom GenScript Trl (N-term) 163185-42	Trl	wild type	1	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031915	SRS939879	GSM1689698	Custom Covance Twi (aa 340-490)	Twi	tl10b	1	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031916	SRS939880	GSM1689699	Custom Covance Twi (aa 340-490)	Twi	tl10b	2	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031899	SRS939897	GSM1689682	Custom GenScript Zen (full length)	Zen	gd7	1	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR2031900	SRS939877	GSM1689683	Custom GenScript Zen (full length)	Zen	gd7	2	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR4044401	SRS1629206	GSM2285341		CBP	wild type	1	2-4 hr after egg deposition
+ChIP-Seq	51	SINGLE	SRR4044406	SRS1629212	GSM2285346		H3K27ac	tl10b	3	2-4 hr after egg deposition

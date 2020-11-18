@@ -1,0 +1,212 @@
+import pandas as pd
+import re
+import glob
+
+chip_samples = pd.read_csv("chipseq_metadata.txt", sep = '\t')
+chip_samples["sample_name"] = (chip_samples["antibody"] + "_" +
+							   chip_samples["genotype"] + "_Rep" + 
+							   chip_samples["replicate"].map(str))
+chip_samples = chip_samples.set_index("sample_name", drop=False)
+
+CHIP_SAMPLE_NAMES = chip_samples['sample_name'].tolist()
+fastq_ids = [re.sub(r'\.fastq\.gz$', '', f) for f in chip_samples['fastq'].tolist()]
+
+chip_merged_samples = list(set(chip_samples["antibody"] + "_" + chip_samples["genotype"].tolist()))
+
+localrules: all
+
+rule all:
+	input:
+		"fastq/fastqc/multiqc_report.html",
+		expand("chipseq_aligned/{name}_sorted_filtered_mkdup.bam", name = CHIP_SAMPLE_NAMES),
+		expand("chipseq_aligned/{name}_sorted_filtered_canonical_chrs.bw", name = CHIP_SAMPLE_NAMES),
+		expand("chipseq_aligned/{chip}_sorted_filtered_merged_canonical_chrs.bw", 
+			chip = chip_merged_samples),
+		expand("chipseq_aligned/{chip}_{genotype}_sorted_filtered_merged_canonical_chrs_log2fc.bw",
+			chip = ["H3K27ac", "H3K27me3"], genotype = ["Tollrm910"]),
+		expand("chipseq_peaks/{chip}_{genotype}_{rep}_peaks_{peaktype}.hitile",
+			chip = ["H3K27ac", "H3K27me3"], genotype = ["Tollrm910"],
+			rep = ["Rep1", "Rep2"], peaktype = ["narrowPeak", "broadPeak"])
+
+
+rule fastqc:
+	input:
+		"fastq/{id}.fastq.gz"
+	output:
+		"fastq/fastqc/{id}_fastqc.html",
+		"fastq/fastqc/{id}_fastqc.zip"
+	shell:
+		"fastqc -o fastq/fastqc/ -f fastq {input}"
+
+rule multiqc:
+	input:
+		expand("fastq/fastqc/{id}_fastqc.html", id = fastq_ids),
+		expand("fastq/fastqc/{id}_fastqc.zip", id = fastq_ids)
+
+	output:
+		"fastq/fastqc/multiqc_report.html"
+	shell:
+		"multiqc -o fastq/fastqc fastq/fastqc/"
+
+
+###################
+# CHIP-SEQ
+###################
+
+def chip_sample_lookup(wildcards):
+	row = chip_samples.loc[wildcards.name]
+	d = {'read1': f"fastq/{row.fastq}"}
+	return d
+
+rule align:
+	input: 
+		unpack(chip_sample_lookup)
+	output:
+		"chipseq_aligned/{name}_sorted_filtered.bam",
+		"chipseq_aligned/{name}_sorted_filtered.bam.bai"
+	threads: 8
+	shell:
+		"""
+		mytmp='/tmp/lingsim/'
+		echo $mytmp
+
+		mkdir -p $mytmp
+
+		echo 'Working on {wildcards.name}, using {input.read1}, will produce {output}'
+		echo 'Aligning and sorting; working in $mytmp'
+		
+		bowtie2 --version
+
+		bowtie2 --local -q -p {threads} \
+			-x /home/research/vaquerizas/store/genomes/insects/Dmel/6.07/Bowtie2Index/genome \
+			-U {input.read1} | samtools view -Sb - > $mytmp/{wildcards.name}.bam
+
+		samtools --version
+		
+		samtools sort -@ {threads} -m 10G -T $mytmp/{wildcards.name} -O BAM -o $mytmp/{wildcards.name}_sorted.bam $mytmp/{wildcards.name}.bam
+		samtools view -@ {threads} -h -q 30 -F 0x904 -b $mytmp/{wildcards.name}_sorted.bam > $mytmp/{wildcards.name}_sorted_filtered.bam
+
+		echo 'Cleaning up...'
+
+		mv $mytmp/{wildcards.name}_sorted_filtered.bam chipseq_aligned/ && rm $mytmp/{wildcards.name}.bam && rm $mytmp/{wildcards.name}_sorted.bam
+
+		samtools index {output}
+		"""
+
+rule mark_duplicates:
+	input:
+		"chipseq_aligned/{name}_sorted_filtered.bam"
+	output:
+		"chipseq_aligned/{name}_sorted_filtered_mkdup.bam"
+	threads: 8
+	shell:
+		"sambamba markdup -t {threads} {input} {output}"
+ 
+rule make_coverage:
+	input:
+		"chipseq_aligned/{name}_sorted_filtered.bam"
+	output:
+		"chipseq_aligned/{name}_sorted_filtered_canonical_chrs.bw"
+	threads: 8
+	shell:
+		"bamCoverage --version && "
+		"bamCoverage -b {input} -o {output} "
+		"-of bigwig --binSize 10 -p {threads} "
+		"--normalizeUsing CPM --extendReads 200 "
+		"--ignoreDuplicates --minMappingQuality 30 "
+		"--blackListFileName ../../../chrs_to_exclude.bed"
+
+rule merge_chipseq:
+	input: 
+		expand("chipseq_aligned/{{chip}}_{{genotype}}_Rep{rep}_sorted_filtered.bam", rep = ["1", "2"])
+	output:
+		"chipseq_aligned/{chip}_{genotype}_sorted_filtered_merged.bam"
+	shell:
+		"samtools merge {output} {input} && samtools index {output}"
+
+rule make_chipseq_coverage_merged:
+	input:
+		"chipseq_aligned/{chip}_{genotype}_sorted_filtered_merged.bam"
+	output:
+		"chipseq_aligned/{chip}_{genotype}_sorted_filtered_merged_canonical_chrs.bw"
+	threads: 8
+	shell:
+		"bamCoverage --version && "
+		"bamCoverage -b {input} -o {output} "
+		"-of bigwig --binSize 10 -p {threads} "
+		"--normalizeUsing CPM --extendReads 200 "
+		"--ignoreDuplicates --minMappingQuality 30 "
+		"--blackListFileName ../../../chrs_to_exclude.bed"
+
+rule make_chipseq_coverage_logfc:
+	input:
+		"chipseq_aligned/{chip}_{genotype}_sorted_filtered_merged_canonical_chrs.bw"
+	output:
+		"chipseq_aligned/{chip}_{genotype}_sorted_filtered_merged_canonical_chrs_log2fc.bw"
+	threads: 8
+	shell:
+		"bigwigCompare --version && "
+		"bigwigCompare --bigwig1 {input} "
+		"--bigwig2 chipseq_aligned/input_{wildcards.genotype}_sorted_filtered_merged_canonical_chrs.bw "
+		"-o {output} -of bigwig "
+		"--operation log2 "
+		"--blackListFileName ../../../chrs_to_exclude.bed "
+		"--binSize 10 -p {threads} "
+
+
+rule call_peaks:
+	input:
+		chip = "chipseq_aligned/{chip}_{genotype}_{rep}_sorted_filtered.bam",
+		control = "chipseq_aligned/input_{genotype}_sorted_filtered_merged.bam",
+	params:
+		name = "{chip}_{genotype}_{rep}"
+	output:
+		"chipseq_peaks/{chip}_{genotype}_{rep}_peaks.narrowPeak"
+	shell:
+		"macs2 --version && "
+		"macs2 callpeak -t {input.chip} -c {input.control} "
+		"--nomodel --extsize 147 -g dm "
+		"-n {params.name} --outdir chipseq_peaks/"
+
+rule call_broad_peaks:
+	input:
+		chip = "chipseq_aligned/{chip}_{genotype}_{rep}_sorted_filtered.bam",
+		control = "chipseq_aligned/input_{genotype}_sorted_filtered_merged.bam",
+	params:
+		name = "{chip}_{genotype}_{rep}"
+	output:
+		"chipseq_peaks/{chip}_{genotype}_{rep}_peaks.broadPeak"
+	shell:
+		"macs2 --version && "
+		"macs2 callpeak -t {input.chip} -c {input.control} "
+		"--nomodel --extsize 147 -g dm "
+		"--broad --min-length 500 --max-gap 200 "
+		"-n {params.name} --outdir chipseq_peaks/"
+
+
+rule filter_peaks:
+	input:
+		expand("chipseq_peaks/{name}_peaks.{peaktype}",
+			name = CHIP_SAMPLE_NAMES, peaktype = ["narrowPeak", "broadPeak"])
+		# expand("chipseq_peaks/{chip}_{genotype}_{rep}_peaks.narrowPeak", 
+		# 	chip = ["H3K27ac", "H3K4me1", "H3K27me3"], genotype = ["gd7", "tl10b"], rep = ["Rep1", "Rep2"]),
+		# "chipseq_peaks/CBP_wildtype_Rep1_peaks.narrowPeak"
+	output:
+		expand("chipseq_peaks/{name}_peaks_filtered.{peaktype}",
+			name = CHIP_SAMPLE_NAMES, peaktype = ["narrowPeak", "broadPeak"])
+		# expand("chipseq_peaks/{chip}_{genotype}_{rep}_peaks_filtered.narrowPeak",
+		# 	chip = ["H3K27ac", "H3K4me1", "H3K27me3"], genotype = ["gd7", "tl10b"], rep = ["Rep1", "Rep2"]),
+		# "chipseq_peaks/CBP_wildtype_Rep1_peaks_filtered.narrowPeak"
+	script:
+		"filter_peaks.R"
+
+rule peaks_hitile:
+	input:
+		"chipseq_peaks/{chip}_{genotype}_{rep}_peaks_filtered.{peaktype}"
+	output:
+		"chipseq_peaks/{chip}_{genotype}_{rep}_peaks_{peaktype}.hitile"
+	shell:
+		"clodius aggregate bedfile "
+		"--importance-column 5 --no-header "
+		" --chromsizes-filename ../../../dm6_chrom_sizes_sanitized.txt "
+		" -o {output} {input} "

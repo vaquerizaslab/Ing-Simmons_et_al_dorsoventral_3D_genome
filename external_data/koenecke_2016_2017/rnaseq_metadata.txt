@@ -1,0 +1,9 @@
+Assay_Type	AvgSpotLen	LibraryLayout	Run	SRA_Sample	Sample_Name	genotype_variation	replicate	developmental_stage
+RNA-Seq	50	SINGLE	SRR2504044	SRS1087024	GSM1891976	gd7	1	2-4 hr after egg deposition
+RNA-Seq	50	SINGLE	SRR2504045	SRS1087023	GSM1891977	gd7	2	2-4 hr after egg deposition
+RNA-Seq	50	SINGLE	SRR2504046	SRS1087016	GSM1891978	gd7	3	2-4 hr after egg deposition
+RNA-Seq	51	SINGLE	SRR4044394	SRS1629201	GSM2285334	tl10b	1	2-4 hr after egg deposition
+RNA-Seq	51	SINGLE	SRR4044395	SRS1629200	GSM2285335	tl10b	2	2-4 hr after egg deposition
+RNA-Seq	50	SINGLE	SRR4044396	SRS1629202	GSM2285336	tlrm910	1	2-4 hr after egg deposition
+RNA-Seq	50	SINGLE	SRR4044397	SRS1629204	GSM2285337	tlrm910	2	2-4 hr after egg deposition
+RNA-Seq	50	SINGLE	SRR4044398	SRS1629205	GSM2285338	tlrm910	3	2-4 hr after egg deposition

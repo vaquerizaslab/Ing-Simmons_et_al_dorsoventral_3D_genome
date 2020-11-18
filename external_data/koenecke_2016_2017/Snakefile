@@ -1,0 +1,368 @@
+import pandas as pd
+import re
+import glob
+
+sra_ids = lines = [line.rstrip('\n') for line in open('sra_ids.txt')]
+
+chip_samples = pd.read_csv("chipseq_metadata.txt", sep = '\t')
+chip_samples["sample_name"] = (chip_samples["antibody"] + "_" +
+	chip_samples["genotype_variation"].str.replace(" ", "") +
+	"_Rep" + chip_samples["replicate"].map(str))
+chip_samples = chip_samples.set_index("sample_name", drop=False)
+
+CHIP_SAMPLE_NAMES = chip_samples['sample_name'].tolist()
+
+rnaseq_samples = pd.read_csv("rnaseq_metadata.txt", sep = '\t')
+rnaseq_samples["sample_name"] = (rnaseq_samples["genotype_variation"] +
+	"_Rep" + rnaseq_samples["replicate"].map(str))
+rnaseq_samples = rnaseq_samples.set_index("sample_name", drop=False)
+
+RNASEQ_SAMPLE_NAMES = rnaseq_samples['sample_name'].tolist()
+
+
+chip_merged_samples = list(set(chip_samples["antibody"] + "_" + chip_samples["genotype_variation"].str.replace(" ", "").tolist()))
+
+localrules: all
+
+rule all:
+	input:
+		"fastq/fastqc/multiqc_report.html",
+		## CHIP-SEQ
+		expand("chipseq_aligned/{name}_sorted_filtered_mkdup.bam", name = CHIP_SAMPLE_NAMES),
+		expand("chipseq_aligned/{name}_sorted_filtered_canonical_chrs.bw", name = CHIP_SAMPLE_NAMES),
+		expand("chipseq_aligned/{chip}_sorted_filtered_merged_canonical_chrs.bw", 
+			chip = chip_merged_samples),
+		expand("chipseq_aligned/{chip}_{genotype}_sorted_filtered_merged_canonical_chrs_log2fc.bw",
+			chip = ["H3K27ac", "H3K4me1", "H3K27me3"], genotype = ["gd7", "tl10b"]),
+		expand("chipseq_peaks/{name}_peaks_{peaktype}.hitile", 
+			name = CHIP_SAMPLE_NAMES, peaktype = ["narrowPeak", "broadPeak"]),
+		## RNA-SEQ
+		expand("rnaseq_quantifications/{name}/quant.sf", name = RNASEQ_SAMPLE_NAMES),
+		expand("rnaseq_aligned/{name}_sorted_filtered_canonical_chrs_rnaseq.bw", name = RNASEQ_SAMPLE_NAMES),
+		expand("rnaseq_aligned/{genotype}_sorted_filtered_merged_canonical_chrs_rnaseq.bw", genotype = ["gd7", "tl10b", "tlrm910"]),
+		"rnaseq_results/txi_tpm_table.txt",
+
+
+rule get_data:
+	output:
+		"fastq/{id}.fastq.gz"
+	shell:
+		"fastq-dump --outdir fastq --gzip --split-3 --readids -B "
+		"--skip-technical --clip {wildcards.id}"
+
+rule fastqc:
+	input:
+		"fastq/{id}.fastq.gz"
+	output:
+		"fastq/fastqc/{id}_fastqc.html",
+		"fastq/fastqc/{id}_fastqc.zip"
+	shell:
+		"fastqc -o fastq/fastqc/ -f fastq {input}"
+
+rule multiqc:
+	input:
+		expand("fastq/fastqc/{id}_fastqc.html", id = sra_ids),
+		expand("fastq/fastqc/{id}_fastqc.zip", id = sra_ids)
+
+	output:
+		"fastq/fastqc/multiqc_report.html"
+	shell:
+		"multiqc -o fastq/fastqc fastq/fastqc/"
+
+
+###################
+# CHIP-SEQ
+###################
+
+def chip_sample_lookup(wildcards):
+	row = chip_samples.loc[wildcards.name]
+	d = {'read1': f"fastq/{row.Run}.fastq.gz"}
+	return d
+
+rule align:
+	input: 
+		unpack(chip_sample_lookup)
+	output:
+		"chipseq_aligned/{name}_sorted_filtered.bam",
+		"chipseq_aligned/{name}_sorted_filtered.bam.bai"
+	threads: 8
+	shell:
+		"""
+		mytmp='/tmp/lingsim/'
+		echo $mytmp
+
+		mkdir -p $mytmp
+
+		echo 'Working on {wildcards.name}, using {input.read1}, will produce {output}'
+		echo 'Aligning and sorting; working in $mytmp'
+		
+		bowtie2 --version
+
+		bowtie2 --local -q -p {threads} \
+			-x /home/research/vaquerizas/store/genomes/insects/Dmel/6.07/Bowtie2Index/genome \
+			-U {input.read1} | samtools view -Sb - > $mytmp/{wildcards.name}.bam
+
+		samtools --version
+		
+		samtools sort -@ {threads} -m 10G -T $mytmp/{wildcards.name} -O BAM -o $mytmp/{wildcards.name}_sorted.bam $mytmp/{wildcards.name}.bam
+		samtools view -@ {threads} -h -q 30 -F 0x4 -F 0x100 -F 0x800 -b $mytmp/{wildcards.name}_sorted.bam > $mytmp/{wildcards.name}_sorted_filtered.bam
+
+		echo 'Cleaning up...'
+
+		mv $mytmp/{wildcards.name}_sorted_filtered.bam chipseq_aligned/ && rm $mytmp/{wildcards.name}.bam && rm $mytmp/{wildcards.name}_sorted.bam
+
+		samtools index {output}
+		"""
+
+rule mark_duplicates:
+	input:
+		"chipseq_aligned/{name}_sorted_filtered.bam"
+	output:
+		"chipseq_aligned/{name}_sorted_filtered_mkdup.bam"
+	threads: 8
+	shell:
+		"sambamba markdup -t {threads} {input} {output}"
+
+rule make_coverage:
+	input:
+		"chipseq_aligned/{name}_sorted_filtered.bam"
+	output:
+		"chipseq_aligned/{name}_sorted_filtered_canonical_chrs.bw"
+	threads: 8
+	shell:
+		"bamCoverage --version && "
+		"bamCoverage -b {input} -o {output} "
+		"-of bigwig --binSize 10 -p {threads} "
+		"--normalizeUsing CPM --extendReads 200 "
+		"--ignoreDuplicates --minMappingQuality 30 "
+		"--blackListFileName ../../../chrs_to_exclude.bed"
+
+def get_chipseq_to_merge(wildcards):
+    genotype = wildcards.genotype
+    chip = wildcards.chip
+    return glob.glob(f"chipseq_aligned/{chip}_{genotype}_Rep" + "*_sorted_filtered.bam", recursive = False)
+
+rule merge_chipseq:
+	input: get_chipseq_to_merge
+	output:
+		"chipseq_aligned/{chip}_{genotype}_sorted_filtered_merged.bam"
+	shell:
+		"samtools merge {output} {input} && samtools index {output}"
+
+rule make_chipseq_coverage_merged:
+	input:
+		"chipseq_aligned/{chip}_{genotype}_sorted_filtered_merged.bam"
+	output:
+		"chipseq_aligned/{chip}_{genotype}_sorted_filtered_merged_canonical_chrs.bw"
+	threads: 8
+	shell:
+		"bamCoverage --version && "
+		"bamCoverage -b {input} -o {output} "
+		"-of bigwig --binSize 10 -p {threads} "
+		"--normalizeUsing CPM --extendReads 200 "
+		"--ignoreDuplicates --minMappingQuality 30 "
+		"--blackListFileName ../../../chrs_to_exclude.bed"
+
+rule make_chipseq_coverage_logfc:
+	input:
+		"chipseq_aligned/{chip}_{genotype}_sorted_filtered_merged_canonical_chrs.bw"
+	output:
+		"chipseq_aligned/{chip}_{genotype}_sorted_filtered_merged_canonical_chrs_log2fc.bw"
+	threads: 8
+	shell:
+		"bigwigCompare --version && "
+		"bigwigCompare --bigwig1 {input} "
+		"--bigwig2 chipseq_aligned/input_{wildcards.genotype}_sorted_filtered_merged_canonical_chrs.bw "
+		"-o {output} -of bigwig "
+		"--operation log2 "
+		"--blackListFileName ../../../chrs_to_exclude.bed "
+		"--binSize 10 -p {threads} "
+
+rule call_peaks:
+	input:
+		chip = "chipseq_aligned/{chip}_{genotype}_{rep}_sorted_filtered.bam",
+		control = "chipseq_aligned/input_{genotype}_sorted_filtered_merged.bam",
+	params:
+		name = "{chip}_{genotype}_{rep}"
+	output:
+		"chipseq_peaks/{chip}_{genotype}_{rep}_peaks.narrowPeak"
+	shell:
+		"macs2 --version && "
+		"macs2 callpeak -t {input.chip} -c {input.control} "
+		"--nomodel --extsize 147 -g dm "
+		"-n {params.name} --outdir chipseq_peaks/"
+
+
+rule call_broad_peaks:
+	input:
+		chip = "chipseq_aligned/{chip}_{genotype}_{rep}_sorted_filtered.bam",
+		control = "chipseq_aligned/input_{genotype}_sorted_filtered_merged.bam",
+	params:
+		name = "{chip}_{genotype}_{rep}"
+	output:
+		"chipseq_peaks/{chip}_{genotype}_{rep}_peaks.broadPeak"
+	shell:
+		"macs2 --version && "
+		"macs2 callpeak -t {input.chip} -c {input.control} "
+		"--nomodel --extsize 147 -g dm "
+		"--broad --min-length 500 --max-gap 200 "
+		"-n {params.name} --outdir chipseq_peaks/"
+
+
+rule filter_peaks:
+	input:
+		expand("chipseq_peaks/{name}_peaks.{peaktype}",
+			name = CHIP_SAMPLE_NAMES, peaktype = ["narrowPeak", "broadPeak"])
+		# expand("chipseq_peaks/{chip}_{genotype}_{rep}_peaks.narrowPeak", 
+		# 	chip = ["H3K27ac", "H3K4me1", "H3K27me3"], genotype = ["gd7", "tl10b"], rep = ["Rep1", "Rep2"]),
+		# "chipseq_peaks/CBP_wildtype_Rep1_peaks.narrowPeak"
+	output:
+		expand("chipseq_peaks/{name}_peaks_filtered.{peaktype}",
+			name = CHIP_SAMPLE_NAMES, peaktype = ["narrowPeak", "broadPeak"])
+		# expand("chipseq_peaks/{chip}_{genotype}_{rep}_peaks_filtered.narrowPeak",
+		# 	chip = ["H3K27ac", "H3K4me1", "H3K27me3"], genotype = ["gd7", "tl10b"], rep = ["Rep1", "Rep2"]),
+		# "chipseq_peaks/CBP_wildtype_Rep1_peaks_filtered.narrowPeak"
+	script:
+		"filter_peaks.R"
+
+rule peaks_hitile:
+	input:
+		"chipseq_peaks/{chip}_{genotype}_{rep}_peaks_filtered.{peaktype}"
+	output:
+		"chipseq_peaks/{chip}_{genotype}_{rep}_peaks_{peaktype}.hitile"
+	shell:
+		"clodius aggregate bedfile "
+		"--importance-column 5 --no-header "
+		" --chromsizes-filename ../../../dm6_chrom_sizes_sanitized.txt "
+		" -o {output} {input} "
+
+###################
+# RNA-SEQ
+###################
+
+def rnaseq_sample_lookup(wildcards):
+	row = rnaseq_samples.loc[wildcards.name]
+	d = {'read1': f"fastq/{row.Run}.fastq.gz"}
+	return d
+
+# This doesn't work, so skipping it...
+# rule make_salmon_decoys:
+# 	output: 
+# 		"salmon_indexes/decoys.txt"
+# 	shell:
+# 		"~/software/SalmonTools/scripts/generateDecoyTranscriptome.sh "
+# 		"-g dmel-all-chromosome-r6.30.fasta.gz "
+# 		"-t ../flybase/dmel-all-transcript-r6.30.fasta.gz "
+# 		"-a dmel-all-r6.30.gtf.gz "
+# 		" -o salmon_indexes/"
+
+rule make_salmon_index:
+	output:
+		"dmel_6.30_salmon_index/"
+	threads: 8
+	shell:
+		"~/software/salmon --version && "
+		"~/software/salmon index -t ../flybase/dmel-all-transcript-r6.30.fasta.gz -i dmel_6.30_salmon_index/ -p {threads}"
+
+rule salmon_quantify:
+	input:
+		unpack(rnaseq_sample_lookup),
+		index = "dmel_6.30_salmon_index/"
+	output:
+		"rnaseq_quantifications/{name}/quant.sf"
+	params:
+		index = "dmel_6.30_salmon_index/"
+	threads: 8
+	shell:
+		"~/software/salmon --version && "
+		"~/software/salmon quant -i {input.index} -l A -r {input.read1} "
+		"--validateMappings --seqBias -p {threads} "
+        "-o rnaseq_quantifications/{wildcards.name}/"
+
+rule align_rnaseq:
+	input:
+		unpack(rnaseq_sample_lookup)
+	output:
+		bam = "rnaseq_aligned/{name}_sorted_filtered.bam",
+		bai = "rnaseq_aligned/{name}_sorted_filtered.bam.bai"
+	params:
+		index = "/home/research/vaquerizas/store/genomes/insects/Dmel/6.22/hisat2_indexes/genome_tran"
+	threads: 8
+	shell:
+		"""
+		mytmp='/tmp/lingsim/'
+		echo $mytmp
+
+		mkdir -p $mytmp
+
+		echo 'Working on {wildcards.name}, using {input.read1}, will produce {output}'
+		echo 'Aligning and sorting; working in $mytmp'
+		
+		~/bin/hisat2 --version
+
+		~/bin/hisat2 -q -p {threads} \
+			-x {params.index} -U {input.read1} | samtools view -Sb - > $mytmp/{wildcards.name}.bam
+
+		samtools --version
+		
+		samtools sort -@ {threads} -m 10G -T $mytmp/{wildcards.name} -O BAM -o $mytmp/{wildcards.name}_sorted.bam $mytmp/{wildcards.name}.bam
+		samtools view -@ {threads} -h -q 30 -F 0x4 -F 0x100 -F 0x800 -b $mytmp/{wildcards.name}_sorted.bam > $mytmp/{wildcards.name}_sorted_filtered.bam
+
+		echo 'Cleaning up...'
+
+		mv $mytmp/{wildcards.name}_sorted_filtered.bam rnaseq_aligned/ && rm $mytmp/{wildcards.name}.bam && rm $mytmp/{wildcards.name}_sorted.bam
+
+		samtools index {output.bam}
+		"""
+
+rule make_rnaseq_coverage:
+	input:
+		"rnaseq_aligned/{name}_sorted_filtered.bam"
+	output:
+		"rnaseq_aligned/{name}_sorted_filtered_canonical_chrs_rnaseq.bw"
+	threads: 8
+	shell:
+		"bamCoverage --version && "
+		"bamCoverage -b {input} -o {output} "
+		"-of bigwig --binSize 10 -p {threads} "
+		"--normalizeUsing CPM --minMappingQuality 30 "
+		"--blackListFileName ../../../chrs_to_exclude.bed "
+
+def get_rnaseq_to_merge(wildcards):
+    genotype = wildcards.genotype
+    return glob.glob(f"rnaseq_aligned/{genotype}_Rep" + "*_sorted_filtered.bam", recursive = False)
+
+rule merge_rnaseq:
+	input: get_rnaseq_to_merge
+	output:
+		"rnaseq_aligned/{genotype}_sorted_filtered_merged.bam"
+	shell:
+		"samtools merge {output} {input} && samtools index {output}"
+
+rule make_rnaseq_coverage_merged:
+	input:
+		"rnaseq_aligned/{genotype}_sorted_filtered_merged.bam"
+	output:
+		"rnaseq_aligned/{genotype}_sorted_filtered_merged_canonical_chrs_rnaseq.bw"
+	threads: 8
+	shell:
+		"bamCoverage --version && "
+		"bamCoverage -b {input} -o {output} "
+		"-of bigwig --binSize 10 -p {threads} "
+		"--normalizeUsing CPM --minMappingQuality 30 "
+		"--blackListFileName ../../../chrs_to_exclude.bed "
+
+
+rule differential_expression_analysis:
+	input:
+		expand("rnaseq_quantifications/{name}/quant.sf",
+			name=RNASEQ_SAMPLE_NAMES)
+	output:
+		"rnaseq_results/txi_tpm_table.txt",
+		expand("rnaseq_results/{comparison}_padj005_log2foldchange2_results.txt",
+			comparison=["gd7_vs_tlrm910", "gd7_vs_tl10b", "tlrm910_vs_tl10b"]),
+		"scripts/differential_expression_analysis.html"
+	shell:
+		"R -e \"rmarkdown::render('/home/research/vaquerizas/liz/dorsal_ventral/for_paper/external_data/koenecke_2016_2017/scripts/differential_expression_analysis.Rmd', "
+        "output_file='/home/research/vaquerizas/liz/dorsal_ventral/for_paper/external_data/koenecke_2016_2017/scripts/differential_expression_analysis.html', "
+        "knit_root_dir='/home/research/vaquerizas/liz/dorsal_ventral/for_paper/external_data/koenecke_2016_2017/scripts/')\""
