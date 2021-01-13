@@ -9,7 +9,7 @@ The analysis is set up as several separate [Snakemake](https://snakemake.readthe
 
 ### Data
 
-This analysis uses data from the following ArrayExpress accessions (which will be publicly available upon publication):
+This analysis uses data from the following ArrayExpress accessions:
 * ChIP-seq: E-MTAB-9303
 * scRNA-seq: E-MTAB-9304
 * Hi-C: E-MTAB-9306
@@ -17,9 +17,13 @@ This analysis uses data from the following ArrayExpress accessions (which will b
 
 We also used publicly available ChIP-seq and RNA-seq data from [Koenecke et al. 2016](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-1057-2), with GEO accession GSE68983, as well as ChIP-seq data from [modENCODE](http://www.modencode.org/).
 
+### Software requirements
+
+Python packages and versions used can be found in `requirements.txt`. R packages and versions used can be found in `renv.lock` (for more information on using renv, see [here](https://rstudio.github.io/renv/articles/renv.html)).
+
 ### ChIP-seq and RNA-seq analysis
 
-This can be found in the `external_data/` directory. Each individual data source has its own subdiretory with its own `Snakefile`. These are set up so that the relationship between files and samples is specified in a `metadata.txt` file. Only the input fastq files and the `metadata.txt` files should be needed to run the workflow to produce `.bam` and `.bw` files. 
+This can be found in the `external_data/` directory. Each individual data source has its own subdirectory with its own `Snakefile`. These are set up so that the relationship between files and samples is specified in a `metadata.txt` file. Only the input fastq files and the `metadata.txt` files should be needed to run the workflow to produce `.bam` and `.bw` files. 
 
 ### scRNA-seq analysis
 
