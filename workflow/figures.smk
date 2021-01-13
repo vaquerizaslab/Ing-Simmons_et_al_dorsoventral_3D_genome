@@ -3,40 +3,40 @@
 ###################
 
 rule get_de_gene_regions:
-	output:
-		"external_data/koenecke_2016_2017/rnaseq_results/gd7_vs_tl10b_locations_of_de_genes_with_enhancers.bed",
-		"external_data/koenecke_2016_2017/rnaseq_results/gd7_vs_tlrm910_locations_of_de_genes_with_enhancers.bed",
-		"external_data/koenecke_2016_2017/rnaseq_results/tlrm910_vs_tl10b_locations_of_de_genes_with_enhancers.bed"
-	script:
-		"scripts/get_de_gene_regions.R"
+    output:
+        "external_data/koenecke_2016_2017/rnaseq_results/gd7_vs_tl10b_locations_of_de_genes_with_enhancers.bed",
+        "external_data/koenecke_2016_2017/rnaseq_results/gd7_vs_tlrm910_locations_of_de_genes_with_enhancers.bed",
+        "external_data/koenecke_2016_2017/rnaseq_results/tlrm910_vs_tl10b_locations_of_de_genes_with_enhancers.bed"
+    script:
+        "scripts/get_de_gene_regions.R"
 
 rule plot_de_gene_regions_nc14:
-	input:
-		"external_data/koenecke_2016_2017/rnaseq_results/{rnaseq_comparison}_locations_of_de_genes_with_enhancers.bed",
-	output:
-		"figures/de_genes_regions/{rnaseq_comparison}_de_gene_regions_nc14.pdf"
-	shell:
-		"python scripts/plot_de_gene_regions.py {input} {output}"
+    input:
+        "external_data/koenecke_2016_2017/rnaseq_results/{rnaseq_comparison}_locations_of_de_genes_with_enhancers.bed",
+    output:
+        "figures/de_genes_regions/{rnaseq_comparison}_de_gene_regions_nc14.pdf"
+    shell:
+        "python scripts/plot_de_gene_regions.py {input} {output}"
 
 rule plot_de_gene_regions_stg10:
-	input:
-		"external_data/koenecke_2016_2017/rnaseq_results/{rnaseq_comparison}_locations_of_de_genes_with_enhancers.bed",
-	output:
-		"figures/de_genes_regions/{rnaseq_comparison}_de_gene_regions_stg10.pdf"
-	shell:
-		"python scripts/plot_de_gene_regions_stg10.py {input} {output}"
+    input:
+        "external_data/koenecke_2016_2017/rnaseq_results/{rnaseq_comparison}_locations_of_de_genes_with_enhancers.bed",
+    output:
+        "figures/de_genes_regions/{rnaseq_comparison}_de_gene_regions_stg10.pdf"
+    shell:
+        "python scripts/plot_de_gene_regions_stg10.py {input} {output}"
 
 ## Figure 1
 
 rule plot_fig1_regions:
-	input:
-		"data/hic/merged/3-4h/hic/3-4h_2kb.hic"
-	output: 
-		"figures/figure_1_panels/figure1_regions.pdf"
-	params:
-		output_prefix = "figures/figure_1_panels/figure1_regions"
-	shell:
-		"python scripts/plot_fig1_regions.py {params.output_prefix}"
+    input:
+        "data/hic/merged/3-4h/hic/3-4h_2kb.hic"
+    output: 
+        "figures/figure_1_panels/figure1_regions.pdf"
+    params:
+        output_prefix = "figures/figure_1_panels/figure1_regions"
+    shell:
+        "python scripts/plot_fig1_regions.py {params.output_prefix}"
 
 rule enhancers_figures:
     input:
@@ -102,56 +102,57 @@ rule make_enhancer_heatmap_5kb:
 # Figure 4
 
 rule plot_fig4_regions:
-	input:
-		"data/hic/merged/3-4h/hic/3-4h_2kb.hic"
-	output: 
-		expand("figures/figure_4_panels/{name}.pdf", 
-			name=["twi", "sna", "if", "NetA", "sog", "Doc1", "pnr", "C15"])
-	shell:
-		"python scripts/plot_fig4_regions.py"
+    input:
+        "data/hic/merged/3-4h/hic/3-4h_2kb.hic"
+    output: 
+        expand("figures/figure_4_panels/{name}.pdf", 
+            name=["twi", "sna", "if", "NetA", "sog", "Doc1", "pnr", "C15"])
+    shell:
+        "python scripts/plot_fig4_regions.py"
 
 rule plot_fig4_regions_large:
-	input:
-		"data/hic/merged/3-4h/hic/3-4h_5kb.hic",
-		expand("data/hic/merged/{sample}/hic/diff_control-nc14_{sample}_5kb.hic",
-			sample=["gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14"])
-	output: 
-		expand("figures/figure_4_panels/{name}.pdf", 
-			name=["2L_example", "2R_example", "3L_example", "3R_example", "3R_example2", "X_example"])
-	shell:
-		"python scripts/plot_fig4_regions_large.py"
+    input:
+        "data/hic/merged/3-4h/hic/3-4h_5kb.hic",
+        expand("data/hic/merged/{sample}/hic/diff_control-nc14_{sample}_5kb.hic",
+            sample=["gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14"])
+    output: 
+        expand("figures/figure_4_panels/{name}.pdf", 
+            name=["2L_example", "2R_example", "3L_example", "3R_example", "3R_example2", "X_example"])
+    shell:
+        "python scripts/plot_fig4_regions_large.py"
 
 # Figure 3
 
 rule plot_overview_figure:
-	input: 
-		ancient("data/hic/merged/{merged_sample_name}/hic/{merged_sample_name}_10kb.hic")
-	output:
-		"figures/figure_3_panels/{merged_sample_name}_overview_figure.pdf"
-	shell:
-		"python scripts/plot_overview_figure.py {wildcards.merged_sample_name}"
+    input: 
+        ancient("data/hic/merged/{merged_sample_name}/hic/{merged_sample_name}_10kb.hic")
+    output:
+        "figures/figure_3_panels/{merged_sample_name}_overview_figure.pdf"
+    shell:
+        "python scripts/plot_overview_figure.py {wildcards.merged_sample_name}"
 
 # Figure S4
 
 rule plot_whole_genome:
-	input:
-		"data/hic/merged/{merged_sample_name}/hic/{merged_sample_name}_{res}_wholegenomebalanced.hic"
-	output:
-		"figures/whole_genome/{merged_sample_name}_{res}_wholegenome.pdf"
-	script:
-		"scripts/plot_whole_genome.py"
+    input:
+        "data/hic/merged/{merged_sample_name}/hic/{merged_sample_name}_{res}_wholegenomebalanced.hic"
+    output:
+        "figures/whole_genome/{merged_sample_name}_{res}_wholegenome.pdf"
+    script:
+        "scripts/plot_whole_genome.py"
 
 # Figure 5
 
 
 rule plot_microc_regions:
-	input:
-		"data/micro-c/merged/control/hic/control_{res}.hic"
-	output: 
-		expand("figures/figure_5_panels/{{res}}/{name}.pdf", 
-			name=["twi", "sna", "if", "NetA", "sog", "Doc1", "pnr", "C15"])
-	shell:
-		"python scripts/plot_micro-c_regions.py {wildcards.res} "
+    input:
+        "data/micro-c/merged/control/hic/control_{res}.hic",
+        "data/micro-c/merged/gd7/hic/gd7_{res}.hic"
+    output: 
+        expand("figures/figure_5_panels/{{res}}/{name}.pdf", 
+            name=["twi", "sna", "if", "NetA", "sog", "Doc1", "pnr", "C15"])
+    shell:
+        "python scripts/plot_micro-c_regions.py {wildcards.res} "
 
 rule plot_ep_loop_aggregates:
     input:

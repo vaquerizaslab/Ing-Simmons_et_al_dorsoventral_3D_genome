@@ -51,7 +51,7 @@ localrules: all
 rule all:
     input:
         "data/fastq/fastqc/multiqc_report.html",
-        "scripts/plot_stats.html",
+        #"scripts/plot_stats.html",
         "scripts/analyse_resolution.html",
         # Hi-C
         expand("data/hic/{sample_name}/hic/{sample_name}.hic", sample_name=SAMPLE_NAMES),
@@ -139,8 +139,8 @@ rule all:
         # "data/micro-c/sample_alignment_stats_bwa.txt",
         expand("data/micro-c/merged/{sample}/hic/{sample}_{res}_marginals.bed",
             sample=["control", "gd7"], res=microc_resolutions),
-        expand("data/micro-c/cooler_files/{sample}_{res}.mcool",
-            sample=["control", "gd7"], res="100bp"),
+        # expand("data/micro-c/cooler_files/{sample}_{res}.mcool",
+        #     sample=["control", "gd7"], res="100bp"),
         expand("figures/plot_ep_loop_aggregates/{loop_set}_{sample}-micro-c_{res}_aggregate.pdf",
             sample=["gd7", "control"], res=["1kb", "2kb"],
             loop_set=["gd7_csaw_ef_all", "gd7_csaw_ep_all", "Tollrm910_csaw_ef_all",

@@ -273,7 +273,7 @@ p_microc <- cowplot::plot_grid(cowplot::plot_grid(p_smooth, p_deriv),
                         legend_b, ncol = 1, rel_heights = c(1, .2))
 p_microc
 
-pdf(file = "../figures/figure_microc_panels/microc_distance_decay.pdf",
+pdf(file = "../figures/figure_5_panels/microc_distance_decay.pdf",
     width = 6, height = 3)
 p_microc
 dev.off()
@@ -293,7 +293,7 @@ cowplot::plot_grid(cowplot::plot_grid(p_smooth, p_deriv, p_smooth_stg10, p_deriv
                                       nrow = 2, align = "vh", axis = "lr"),
                    legend_b, nrow = 2, rel_heights = c(2, .2))
 
-pdf(file = "../figures/figure_microc_panels/microc_stg10_distance_decay.pdf",
+pdf(file = "../figures/figure_5_panels/microc_stg10_distance_decay.pdf",
     width = 6, height = 4)
 cowplot::plot_grid(cowplot::plot_grid(p_smooth, p_deriv, p_smooth_stg10, p_deriv_stg10, 
                                       nrow = 2, align = "vh", axis = "lr"),

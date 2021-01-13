@@ -42,7 +42,7 @@ rule mask_heterochromatin:
 	output: 
 		"data/{type}/merged/{merged_sample_name}/hic/{merged_sample_name}_{res}_masked.hic"
 	script:
-		"scripts/mask_heterochromatin.py"
+		"../scripts/mask_heterochromatin.py"
 
 rule custom_eigenvectors_masked:
 	input: 

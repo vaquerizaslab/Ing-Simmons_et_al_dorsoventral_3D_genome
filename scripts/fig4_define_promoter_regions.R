@@ -1,3 +1,7 @@
+library(rtracklayer)
+library(dplyr)
+library(GenomicFeatures)
+
 gene_ids_key <- rtracklayer::import.gff("../../external_data/flybase/dmel-all-r6.30.gtf.gz") %>% 
   as.data.frame() %>%
   dplyr::filter(type == "gene") %>%
