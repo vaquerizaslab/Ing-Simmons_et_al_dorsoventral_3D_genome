@@ -1,0 +1,538 @@
+---
+title: "A-B compartmentalisation for Drosophila embryos"
+output: 
+  html_document:
+    toc: true
+    toc_float: false
+    code_folding: hide
+---
+
+```{r global_options, echo=FALSE}
+short=TRUE #if short==TRUE, do not echo code chunks
+debug=FALSE
+knitr::opts_chunk$set(fig.width=10, fig.height=10, dpi = 300)
+pdf.options(useDingbats = FALSE)
+options(stringsAsFactors = FALSE)
+```
+
+
+```{r load_packages, cache = FALSE}
+library("GenomicRanges")
+library("BSgenome.Dmelanogaster.UCSC.dm6")
+library("biomaRt")
+library("dplyr")
+library("tidyr")
+library("ggplot2")
+library("ComplexHeatmap")
+
+Mb <- scales::unit_format(suffix = " Mb", scale = 1e-6, digits = 2, sep = " ", 
+                          big.mark = ",", accuracy = 1)
+colour_scheme <- c("#648FFF", "#785EF0", "#DC267F", "#FE6100", "#FFB000")
+colour_scheme <- c("#648FFF", "#DC267F", "#FFB000")
+
+datadir <- "~/cluster/dorsal_ventral/for_paper/"
+```
+
+```{r get_gene_data, cache=TRUE}
+mart <- useMart('ENSEMBL_MART_ENSEMBL',dataset='dmelanogaster_gene_ensembl')
+genes <- getBM(attributes=c('ensembl_gene_id','external_gene_name', "chromosome_name",
+                            "start_position", "end_position", "strand",
+                            "gene_biotype"),
+                   mart=mart)
+
+genes$strand <- ifelse(genes$strand== "1", "+","-")
+genes_gr <- makeGRangesFromDataFrame(genes, keep.extra.columns = TRUE, 
+                                     start.field = "start_position", end.field = "end_position")
+
+```
+
+
+```{r read_compartment_data, cache = TRUE}
+samples <- c("nc14", "3-4h", "control-nc14", "gd7-nc14", 
+             "Tollrm910-nc14", "Toll10B-nc14", "control-stg10", 
+             "gd7-stg10", "Tollrm910-stg10", "Toll10B-stg10")
+eig1_files <- file.path(datadir, "data", "hic", "merged", samples, "hic", 
+                       paste0(samples, "_50kb_masked_eig1.bed")) %>% 
+  setNames(samples)
+
+eig2_files <- file.path(datadir, "data", "hic", "merged", samples, "hic",
+                       paste0(samples, "_50kb_masked_eig2.bed")) %>%
+  setNames(samples)
+
+eigs <- lapply(samples, function(s){
+  eig1 <- read.table(eig1_files[s], col.names = c("chr", "start", "end", "eig1"))
+  eig2 <- read.table(eig2_files[s], col.names = c("chr", "start", "end", "eig2"))
+  left_join(eig1, eig2) %>%
+      dplyr::filter(!(chr %in% c("4", "Y")))
+}) %>% setNames(samples)
+```
+
+```{r plot_uncorrected, fig.width = 8, fig.height = 8}
+plot_eigs_with_cor <- function(df){
+  cors <- df %>% spread(sample, eig) %>% 
+    group_by(chr) %>% 
+    summarise_at(vars(samples), list(cor = ~ cor(., `3-4h`))) %>% 
+    gather("sample", "correlation", contains("cor")) %>%
+    mutate(correlation = signif(correlation, 2)) %>%
+    mutate(sample = gsub("_cor", "", sample))
+  
+  p <- ggplot(df, aes(x = start, y = eig)) +
+    geom_line() +
+    geom_hline(yintercept = 0, linetype = 2, colour = "red") +
+    facet_grid(sample~chr, scales = "free_x") +
+    scale_x_continuous(labels = scales::unit_format(unit = "Mb", scale = 1e-6, digits = 2)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) + 
+    geom_text(data = cors, aes(x = 1, y = 0.2, label = correlation, 
+                               colour = correlation < 0), hjust = 0) +
+    scale_colour_manual(values = c("FALSE" = scales::muted("blue"), "TRUE" = "red"), guide = "none")
+
+    return(p)
+}
+
+eig1s <- lapply(names(eigs), function(n){
+  tmp <- eigs[[n]][,c("chr", "start", "end", "eig1")]
+  names(tmp)[4] <- n
+  return(tmp)
+  }) %>%
+  Reduce(function(dtf1,dtf2) left_join(dtf1,dtf2, by = c("chr", "start", "end")), .) %>%
+  gather("sample", "eig", -chr, -start, -end) %>% 
+  dplyr::mutate(sample = factor(sample, levels = samples))
+
+eig2s <- lapply(names(eigs), function(n){
+  tmp <- eigs[[n]][,c("chr", "start", "end", "eig2")]
+  names(tmp)[4] <- n
+  return(tmp)
+  }) %>%
+  Reduce(function(dtf1,dtf2) left_join(dtf1,dtf2, by = c("chr", "start", "end")), .) %>%
+  gather("sample", "eig", -chr, -start, -end) %>% 
+  dplyr::mutate(sample = factor(sample, levels = samples))
+
+p_eig1_cor_uncorrected <- plot_eigs_with_cor(eig1s) + 
+  ggtitle("First eigenvector of correlation matrix, uncorrected")
+p_eig2_cor_uncorrected <- plot_eigs_with_cor(eig2s) + 
+  ggtitle("Second eigenvector of correlation matrix, uncorrected")
+p_eig1_cor_uncorrected
+p_eig2_cor_uncorrected
+```
+
+The correlation with 3-4h is shown on each panel. 
+
+The first eigenvector seems to be the best choice for 3-4h for all chromosomes. The first eigenvector seems generally best for chr X and 3R (3R looks weird in Toll10B and Tollrm9/10 regardless). Other chromosomes are split. 
+
+## Assign gene density as reference and then assign by correlation
+
+```{r fig.width = 6, fig.height = 3}
+# set gene density data as reference for later
+
+bins_gr <- makeGRangesFromDataFrame(eigs$`3-4h`)
+bins_gr$gene_count <- countOverlaps(bins_gr, genes_gr)
+
+ref_data <- as.data.frame(bins_gr) %>%
+  dplyr::select(chr = seqnames, start, end, ref = gene_count) 
+
+p_ref_data <- ggplot(ref_data, aes(x = start, y = ref)) +
+  geom_line() +
+  #geom_hline(yintercept = 0, linetype = 2, colour = "red") +
+  facet_grid(~chr, scales = "free_x") +
+  scale_x_continuous(labels = scales::unit_format(unit = "Mb", scale = 1e-6, digits = 2)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  scale_y_continuous("Genes per 50kb") +
+  coord_cartesian(ylim = c(0, 35)) + 
+  ggtitle("Gene density")
+```
+
+```{r, fig.width = 8, fig.height = 10}
+assign_by_correlation_with_ref <- function(df, ref_data){
+  df <- left_join(df, ref_data, by = c("chr", "start", "end"))
+  
+  cors <- df %>% 
+    group_by(chr) %>% 
+    summarise_at(vars(starts_with("eig")), list( ~ cor(., ref, use = "pairwise.complete.obs"))) %>% 
+    gather("eig", "correlation", starts_with("eig")) %>%
+    arrange(chr, eig)
+  
+  #print(knitr::kable(cors))
+  
+  selected_eigs_by_cor <- cors %>%
+    group_by(chr) %>%
+    filter(abs(correlation) == max(abs(correlation))) %>%
+    mutate(mult = ifelse(correlation < 0, -1, 1))
+  
+  df2 <- df %>%
+    dplyr::select(-ref) %>%
+    gather("eig", "value", starts_with("eig")) %>%
+    left_join(selected_eigs_by_cor, .) %>%
+    mutate(value = value * mult) %>%
+    dplyr::filter(value !=0 ) %>%
+    mutate(ab = ifelse(value > 0, "A", "B")) %>% 
+    dplyr::select(chr, start, end, eig, value, ab, correlation)
+  return(df2)
+}
+
+eig_cor_assigned_by_ref <- lapply(eigs, function(df) { 
+  assign_by_correlation_with_ref(df, ref_data)
+  }) %>% setNames(samples)
+
+
+# summarise corrected data
+eig_cor_assigned_by_ref_summary <- lapply(names(eig_cor_assigned_by_ref), function(n){
+  tmp <- eig_cor_assigned_by_ref[[n]][,c("chr", "start", "end", "value")]
+  names(tmp)[4] <- n
+  return(tmp)
+}) %>%
+Reduce(function(dtf1,dtf2) left_join(dtf1,dtf2, by = c("chr", "start", "end")), .) %>%
+  gather("sample", "value", -chr, -start, -end) %>% 
+  dplyr::mutate(sample = factor(sample, levels = samples))
+
+
+cors <- lapply(eig_cor_assigned_by_ref, function(df){ 
+    df %>%
+    group_by(chr, eig) %>%
+    summarise(correlation = unique(correlation))
+  }) %>% bind_rows(.id = "sample") %>%
+    mutate(label = paste0(eig, ": ", signif(correlation, 2))) %>% 
+  dplyr::mutate(sample = factor(sample, levels = samples))
+  
+# plot corrected data
+p_corrected_by_ref <- eig_cor_assigned_by_ref_summary %>%
+  ggplot(aes(x = start, y = value)) +
+  geom_line() +
+  geom_hline(yintercept = 0, linetype = 2, colour = "red") +
+  facet_grid(sample~chr, scales = "free_x") +
+  scale_x_continuous(labels = scales::unit_format(unit = "Mb", scale = 1e-6, digits = 2)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  ggtitle(paste0("Eigenvectors of correlation matrix, corrected")) +
+  geom_text(data = cors, aes(x = 0, y = -0.1, label = label), hjust = 0, size = 3)
+
+cowplot::plot_grid(p_ref_data, p_corrected_by_ref, nrow = 2, rel_heights = c(0.15, 0.85))
+
+```
+
+```{r}
+Dmel <- Dmelanogaster
+seqlevelsStyle(Dmel) <- "NCBI"
+
+write_eig_bw <- function(df){
+  sample <- unique(df$sample)
+  filename <- file.path(datadir, "data", "compartments_by_gene_density", 
+                        paste0(sample, "_50kb_masked_corrected_eigenvector.bw"))
+  df$value[is.na(df$value)] <- 0
+  makeGRangesFromDataFrame(df, keep.extra.columns = TRUE, 
+                           seqinfo = seqinfo(Dmel)[c("2L", "2R", "3L", "3R", "4", "X")]) %>%
+    coverage(weight = "value") %>%
+    export.bw(con = filename)
+  return(data.frame(filename))
+}
+
+fanc_bed <- import.bed("~/cluster/dorsal_ventral/for_paper/data/hic/merged/3-4h/hic/3-4h_50kb_masked_fanc_eigenvector.bed")
+start(fanc_bed) <- start(fanc_bed) - 1
+
+write_eig_bed <- function(df){
+  sample <- unique(df$sample)
+  filename <- file.path(datadir, "data", "compartments_by_gene_density", 
+                        paste0(sample, "_50kb_masked_corrected_eigenvector.bed"))
+  df$value[is.na(df$value)] <- 0
+  gr <- makeGRangesFromDataFrame(df, keep.extra.columns = TRUE)
+  ol <- findOverlaps(fanc_bed, gr)
+  res <- fanc_bed
+  res$new_score <- 0
+  res$new_score[queryHits(ol)] <- gr$value[subjectHits(ol)]
+
+  res %>% 
+    as.data.frame() %>% 
+    mutate(name = ".", strand = "+") %>% 
+    dplyr::select(seqnames, start, end, name, new_score, strand) %>% 
+    write.table(sep = "\t", col.names = FALSE, row.names = FALSE, quote = FALSE,
+                file = filename)
+  return(data.frame(filename))
+}
+
+eig_cor_assigned_by_ref_summary %>%
+  group_by(sample) %>%
+  do(write_eig_bw(.))
+
+eig_cor_assigned_by_ref_summary %>%
+  group_by(sample) %>%
+  do(write_eig_bed(.))
+    
+```
+
+
+## Validation of compartment assignment
+### Comparison with chromatin colours
+
+Chromatin colours from Filion et al. 2010. Note that this data is from Kc167 cells! BLACK: Heterochromatin; BLUE: Polycomb-associated heterochromatin; GREEN: HP1-associated heterochromatin; RED: regulated euchromatin; YELLOW: broadly active euchromatin.
+
+```{r import_chromatin_colours, cache=TRUE}
+chr_colours_dir <- "~/cluster/hug2017_followup/data/chromatin_colours/" 
+filion_dm3 <- read.table(file.path(chr_colours_dir, "GSE22069_Drosophila_chromatin_domains.txt"),
+                         sep = "\t", header = TRUE, stringsAsFactors = FALSE)
+filion_dm3 <- makeGRangesFromDataFrame(filion_dm3, keep.extra.columns = TRUE)
+
+dm3_dm6_chain <- import.chain(file.path(chr_colours_dir, "/dm3ToDm6.over.chain"))
+
+filion_dm6_list <- liftOver(filion_dm3, dm3_dm6_chain)
+drop_idx <- which(lengths(filion_dm6_list) > 1)
+
+filion_dm6 <- do.call("c", filion_dm6_list[-drop_idx])
+seqlevelsStyle(filion_dm6) <- "NCBI"
+
+filion_dm6 <- split(filion_dm6, filion_dm6$chromatin)
+```
+
+I have to lift over regions of different chromatin colours from dm3 to dm6 - `r length(drop_idx)` regions are removed due to not having a 1:1 relationship.
+
+```{r check_chromatin_colours, fig.width = 8, fig.height = 8}
+check_chromatin_colours <- function(eig_df, ab_column = "ab1"){
+  compartments <- makeGRangesFromDataFrame(eig_df, keep.extra.columns = TRUE)
+  comp_A <- reduce(compartments[mcols(compartments)[[ab_column]] == "A"])
+  comp_B <- reduce(compartments[mcols(compartments)[[ab_column]] == "B"])
+  
+  cc_list <- lapply(names(filion_dm6), function(cc){
+    chrs <- c("2L", "2R", "3L", "3R", "4", "X")
+    by_chr <- lapply(chrs, function(chr){
+      comp_A_subset <- comp_A[seqnames(comp_A) == chr]
+      comp_B_subset <- comp_B[seqnames(comp_B) == chr]
+      cc_gr <- filion_dm6[[cc]]
+      cc_gr <- cc_gr[seqnames(cc_gr) == chr]
+      a_width <- sum(width(GenomicRanges::intersect(cc_gr, comp_A_subset)))
+      b_width <- sum(width(GenomicRanges::intersect(cc_gr, comp_B_subset)))
+      data.frame(chr = chr, cc = cc, compartment = c("A", "B"), overlap = c(a_width, b_width), 
+                 total_size = c(sum(width(comp_A_subset)), sum(width(comp_B_subset))), 
+                 stringsAsFactors = FALSE)
+    })
+    bind_rows(by_chr)
+  })
+  
+  cc_assign <- bind_rows(cc_list) %>%
+    mutate(fraction_overlap = overlap / total_size)
+return(cc_assign) 
+}
+
+
+cc_assignments <- lapply(eig_cor_assigned_by_ref, check_chromatin_colours, ab_column = "ab") %>%
+  bind_rows(.id = "sample") %>% 
+  dplyr::mutate(sample = factor(sample, levels = samples))
+
+cc_plot <- ggplot(cc_assignments, aes(x = compartment, y = fraction_overlap, fill = cc)) +
+    geom_col(position = "stack") +
+    scale_fill_manual(values = tolower(unique(cc_assignments$cc)), guide = "none") +
+    labs(x = "", y = "Fraction of compartment overlapping each chromatin colour") +
+    theme_bw() + 
+    facet_grid(sample~chr)
+cc_plot
+```
+
+In general, regions assigned to the A compartment have higher overlap with "RED" and "YELLOW" active chromatin. The B compartment is enriched for "BLACK" chromatin (that has low enrichment for histone modifications). Very little GREEN chromatin is present as these regions have largely been masked in the Hi-C data. 
+
+"BLUE" Polycomb-repressed chromatin is found in both A and B compartments. While this would typically be found in the B compartment, bearing in mind the chromatin state data comes from Kc167 cells and Polycomb-repressed genes change between cell types, this is not surprising. 
+
+
+## Comparison to differential gene expression
+
+```{r make_bins, cache=TRUE}
+comp_gr_list <- eig_cor_assigned_by_ref %>% 
+  purrr::map(makeGRangesFromDataFrame, keep.extra.columns = TRUE)
+
+seqlengths_df <- eig_cor_assigned_by_ref %>%
+  bind_rows() %>%
+  ungroup() %>%
+  mutate(chr = as.character(chr)) %>%
+  group_by(chr) %>% 
+  summarise(seqlengths = max(end))
+
+make_bins <- function(chr, seqlengths, size, ...){ 
+  starts <- seq(from = 1, to = seqlengths, by = size)
+  ends <- starts + size - 1
+  GRanges(seqnames = chr, ranges = IRanges(starts, ends))}
+
+bins_50kb <- seqlengths_df %>%
+  purrr::pmap(.l = ., .f = make_bins, size = 50000) %>%
+  do.call("c", .)
+```
+
+```{r, cache=TRUE}
+mcols(bins_50kb) <- purrr::map(comp_gr_list, .f = function(gr){
+  ol <- findOverlaps(bins_50kb, gr)
+  res <- rep(NA, length(bins_50kb))
+  res[queryHits(ol)] <- gr$ab[subjectHits(ol)]
+  return(res)
+}) %>% as.data.frame()
+
+```
+
+```{r read_gene_expression, cache=TRUE}
+rnaseq_datadir <- "~/cluster/dorsal_ventral/"
+rnaseq_results_files <- list.files(file.path(rnaseq_datadir, "external_data", "koenecke_2016_2017", "rnaseq_results"),
+                                  "all_results.txt", full.names = TRUE)
+rnaseq_results_list <- lapply(rnaseq_results_files, read.table, header = TRUE, sep = "\t")
+names(rnaseq_results_list) <- gsub("_all_results.txt", "", basename(rnaseq_results_files))
+
+rnaseq_results <- bind_rows(rnaseq_results_list, .id = "comparison") 
+# 
+# %>%
+#   left_join(as.data.frame(genes_gr), by = c("gene_id" = "ensembl_gene_id", 
+#                                             "gene_name" = "external_gene_name"))
+
+```
+
+I'll assign genes to 50kb bins based on the annotated start site of the gene in Ensembl. This might mis-classify some genes with multiple transcription start sites. Given the bin size, though, this shouldn't have a big impact. 
+
+```{r assign_genes_to_compartments, cache=TRUE}
+ol <- findOverlaps(promoters(genes_gr, upstream = 0, downstream = 1), 
+                   bins_50kb)
+
+gene_comp_assignment <- as.data.frame(cbind(mcols(genes_gr[queryHits(ol)]),
+                                            mcols(bins_50kb[subjectHits(ol)]),
+                                            chr = seqnames(genes_gr[queryHits(ol)])))
+```
+
+```{r}
+de_genes_comps_list <- lapply(rnaseq_results_list, function(df){
+  left_join(df, gene_comp_assignment, by = c("gene_id" = "ensembl_gene_id"))
+})
+```
+
+For the purposes of this, I will only consider regions that are in the same compartment in both Hi-C replicates for the same genotype. 
+
+```{r, fig.width=6, fig.height=6, out.width = "50%"}
+comparisons = list(c("A>A", "A>B"), c("B>B", "B>A"))
+
+gd7_vs_tl10b_summary <- de_genes_comps_list$gd7_vs_tl10b %>%
+  dplyr::filter(!is.na(`gd7.nc14`), !is.na(`Toll10B.nc14`)) %>% 
+  tidyr::unite("compartment", Toll10B.nc14, gd7.nc14, sep = ">")
+
+gd7_vs_tl10b_summary %>%
+  dplyr::filter(padj < 0.1) %>%
+  ggplot(aes(x = compartment, y = log2FoldChange)) +
+  #geom_jitter() +
+  geom_violin() +
+  geom_boxplot(width = 0.3) +
+  theme_bw(base_size = 14) +
+  labs(x = "Compartment (Toll10B > gd7)", 
+       y = "Gene expression log2(gd7 / Toll10B)") +
+  ggpubr::stat_compare_means(comparisons = comparisons, method = "wilcox.test") +
+  facet_wrap(~chr)
+
+gd7_vs_tl10b_summary %>%
+  dplyr::filter(padj < 0.05) %>%
+  mutate(direction = ifelse(log2FoldChange > 0, "up", "down")) %>%
+  ggplot(aes(x = compartment, fill = direction)) +
+  geom_bar(position = "fill") +
+  theme_bw(base_size = 14) +
+  labs(x = "Compartment (Toll10B > gd7)", 
+       y = "Gene expression change (gd7 vs Toll10B)") +
+  scale_fill_manual(values = c("black", "grey")) +
+  facet_wrap(~chr)
+```
+
+Genes that change from the A to the B compartment should decrease in expression, and genes that change from B to A should increase. 
+
+```{r, fig.width=6, fig.height=6, out.width = "50%"}
+gd7_vs_tlrm910_summary <- de_genes_comps_list$gd7_vs_tlrm910 %>%
+   dplyr::filter(!is.na(gd7.nc14), !is.na(Tollrm910.nc14)) %>% 
+  tidyr::unite("compartment",Tollrm910.nc14, gd7.nc14,  sep = ">") 
+
+gd7_vs_tlrm910_summary %>%
+  dplyr::filter(padj < 0.05) %>%
+  ggplot(aes(x = compartment, y = log2FoldChange)) +
+  #geom_jitter() +
+  geom_violin() +
+  geom_boxplot(width = 0.3) +
+  theme_bw(base_size = 14) +
+  labs(x = "Compartment (Tollrm910 > gd7)", 
+       y = "Gene expression log2(gd7 / Tollrm910)") +
+  ggpubr::stat_compare_means(comparisons = comparisons, method = "wilcox.test") +
+  facet_wrap(~chr)
+
+gd7_vs_tlrm910_summary %>%
+  dplyr::filter(padj < 0.05) %>%
+  mutate(direction = ifelse(log2FoldChange > 0, "up", "down")) %>%
+  ggplot(aes(x = compartment, fill = direction)) +
+  geom_bar(position = "fill") +
+  theme_bw(base_size = 14) +
+  labs(x = "Compartment (Tollrm910 > gd7)", 
+       y = "Gene expression log2(gd7 / Tollrm910)") +
+  scale_fill_manual(values = c("black", "grey"))  +
+  facet_wrap(~chr)
+```
+
+```{r, fig.width=6, fig.height=6, out.width = "50%"}
+tlrm910_vs_tl10b_summary <- de_genes_comps_list$tlrm910_vs_tl10b %>%
+   dplyr::filter(!is.na(Tollrm910.nc14), !is.na(Toll10B.nc14)) %>% 
+  tidyr::unite("compartment", Toll10B.nc14, Tollrm910.nc14, sep = ">") 
+
+tlrm910_vs_tl10b_summary %>%
+  dplyr::filter(padj < 0.05) %>%
+  ggplot(aes(x = compartment, y = log2FoldChange)) +
+  #geom_jitter() +
+  geom_violin() +
+  geom_boxplot(width = 0.3) +
+  theme_bw(base_size = 14) +
+  labs(x = "Compartment (Toll10B > Tollrm910)", 
+       y = "Gene expression log2(Tollrm910 / Toll10B)") +
+  ggpubr::stat_compare_means(comparisons = comparisons, method = "wilcox.test") +
+  facet_wrap(~chr)
+
+tlrm910_vs_tl10b_summary %>%
+  dplyr::filter(padj < 0.05) %>%
+  mutate(direction = ifelse(log2FoldChange > 0, "up", "down")) %>%
+  ggplot(aes(x = compartment, fill = direction)) +
+  geom_bar(position = "fill") +
+  theme_bw(base_size = 14) +
+  labs(x = "Compartment (Toll10B > Tollrm910)", 
+       y = "Gene expression log2(Tollrm910 / Toll10B)") +
+  scale_fill_manual(values = c("black", "grey"))  +
+  facet_wrap(~chr)
+```
+
+
+
+```{r, fig.height = 6, fig.width = 10}
+p1 <- gd7_vs_tl10b_summary %>%
+  dplyr::filter(padj < 0.1) %>%
+  dplyr::filter(chr %in% c("2L", "4", "X")) %>% 
+  ggplot(aes(x = compartment, y = log2FoldChange)) +
+  #geom_jitter() +
+  geom_violin() +
+  geom_boxplot(width = 0.3) +
+  theme_bw(base_size = 14) +
+  labs(x = "Compartment (Toll10B > gd7)", 
+       y = "Gene expression log2(gd7 / Toll10B)") +
+  ggpubr::stat_compare_means(comparisons = comparisons, method = "wilcox.test") 
+
+p2 <- gd7_vs_tlrm910_summary %>%
+  dplyr::filter(padj < 0.05) %>%
+  dplyr::filter(chr %in% c("2L", "4", "X")) %>% 
+  ggplot(aes(x = compartment, y = log2FoldChange)) +
+  #geom_jitter() +
+  geom_violin() +
+  geom_boxplot(width = 0.3) +
+  theme_bw(base_size = 14) +
+  labs(x = "Compartment (Tollrm910 > gd7)", 
+       y = "Gene expression log2(gd7 / Tollrm910)") +
+  ggpubr::stat_compare_means(comparisons = comparisons, method = "wilcox.test") 
+
+p3 <- tlrm910_vs_tl10b_summary %>%
+  dplyr::filter(padj < 0.05) %>%
+  dplyr::filter(chr %in% c("2L", "4", "X")) %>% 
+  ggplot(aes(x = compartment, y = log2FoldChange)) +
+  #geom_jitter() +
+  geom_violin() +
+  geom_boxplot(width = 0.3) +
+  theme_bw(base_size = 14) +
+  labs(x = "Compartment (Toll10B > Tollrm910)", 
+       y = "Gene expression log2(Tollrm910 / Toll10B)") +
+  ggpubr::stat_compare_means(comparisons = comparisons, method = "wilcox.test")
+
+
+cowplot::plot_grid(p1, p2, p3, nrow = 1)
+```
+
+## Session info
+
+This report was generated at `r format(Sys.time(), "%X, %a %b %d %Y")`. 
+
+```{r}
+sessionInfo()
+```
