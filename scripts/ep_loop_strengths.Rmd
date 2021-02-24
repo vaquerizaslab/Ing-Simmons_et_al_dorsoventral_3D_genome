@@ -1,0 +1,203 @@
+---
+title: "Dorsal-ventral patterning enhancer-promoter interactions"
+author: "Liz Ing-Simmons"
+date: ""
+output: 
+  html_document:
+    toc: true
+    toc_float: false
+    code_folding: hide
+---
+
+```{r global_options, echo=FALSE}
+knitr::opts_chunk$set(fig.width=6, fig.height=4, dpi = 300, out.width = "60%", dev = c("png", "pdf"),
+             warning=FALSE, message=FALSE)
+pdf.options(useDingbats = FALSE)
+```
+
+```{r load_packages, cache = FALSE}
+library("dplyr")
+library("ggplot2")
+
+colour_scheme <- c(gd7 = "#648FFF", Tollrm910 ="#DC267F", Toll10B = "#FFB000")
+
+```
+
+# Read in enhancer-promoter interaction strength data
+
+
+```{r}
+bedpe_files <- list.files("../figures/plot_ep_loop_aggregates/", pattern = "*.bedpe", full.names = TRUE)
+names(bedpe_files) <- gsub("_loop_strengths.bedpe", "", basename(bedpe_files))
+
+strength_data <- lapply(bedpe_files, function(f){
+  read.table(f, sep = "\t", col.names = c("chr1", "start1", "end1", "chr2", 
+                                          "start2", "end2", "id", "score"))
+}) %>% bind_rows(.id = "file")
+
+
+strength_data <- strength_data %>% 
+  tidyr::separate(file, sep = "_", into = c("enhancer_sample", "enhancer_type", 
+                                            "loop_type", "loop_set", "sample", "resolution")) %>% 
+  dplyr::select(-enhancer_type, -loop_set) %>% 
+  mutate(enhancer_sample = factor(enhancer_sample, levels = c("gd7", "Tollrm910", "Toll10B")))
+
+head(strength_data)
+```
+
+## Enhancer-promoter
+
+```{r fig.width=5, fig.height=3}
+hic_data_2kb <- strength_data %>% 
+  filter(sample %in% c("control-nc14", "gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14")) %>%
+  filter(loop_type== "ep") %>% 
+  filter(resolution == "2kb")
+
+microc_data_1kb <- strength_data %>% 
+  filter(sample %in% c("control-micro-c", "gd7-micro-c")) %>%
+  filter(loop_type== "ep") %>% 
+  filter(resolution == "1kb")
+
+str_data_to_plot <- bind_rows(hic_data_2kb, microc_data_1kb) %>% 
+  mutate(sample = factor(sample, levels = c("control-nc14", "gd7-nc14", "Tollrm910-nc14",
+                                            "Toll10B-nc14", "control-micro-c", "gd7-micro-c")))
+
+
+str_data_pvals <- str_data_to_plot %>% 
+  group_by(enhancer_sample) %>% 
+  summarise(`gd7-nc14` = format.pval(wilcox.test(score[sample == "control-nc14"], 
+                                          score[sample == "gd7-nc14"])$p.value, digits = 2),
+            `Tollrm910-nc14` = format.pval(wilcox.test(score[sample == "control-nc14"], 
+                                          score[sample == "Tollrm910-nc14"])$p.value, digits = 2),
+            `Toll10B-nc14` = format.pval(wilcox.test(score[sample == "control-nc14"], 
+                                          score[sample == "Toll10B-nc14"])$p.value, digits = 2),
+            `gd7-micro-c` = format.pval(wilcox.test(score[sample == "control-micro-c"], 
+                                          score[sample == "gd7-micro-c"])$p.value, digits = 2)) %>% 
+  tidyr::pivot_longer(-enhancer_sample, names_to = "sample", values_to = "pval")
+
+p <- str_data_to_plot %>% 
+  ggplot(aes(x=sample, y = score, fill = sample)) +
+  geom_boxplot(outlier.shape = NA) +
+  facet_grid(~enhancer_sample) +
+  scale_fill_manual(values = c("control-nc14"="lightgrey", "gd7-nc14"= "#648FFF", "Tollrm910-nc14"="#DC267F",
+                               "Toll10B-nc14"="#FFB000", "control-micro-c"="lightgrey", "gd7-micro-c"="#648FFF")) +
+  geom_text(data=str_data_pvals, aes(label = pval), y = 1.2, size = 3.5) +
+  theme_bw() +
+  coord_cartesian(ylim = c(-0.6, 1.25)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
+  labs(y = "log2(observed/expected)", x = "") +
+  # scale_x_discrete(breaks = c("control-nc14", "gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14", "control-micro-c", "gd7-micro-c"),
+  #                  limits = c("control-nc14", "gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14","", "control-micro-c", "gd7-micro-c")) +
+  scale_x_discrete(labels = c("control", "gd7", "Tollrm9/rm10", "Toll10B", "control", "gd7")) +
+  NULL
+p
+
+pdf("../figures/figure_5_panels/ep_loop_strengths.pdf", width=6, height=3)
+p
+dev.off()
+```
+
+## Enhancer-flipped 
+
+```{r fig.width=5, fig.height=3}
+hic_data_2kb <- strength_data %>% 
+  filter(sample %in% c("control-nc14", "gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14")) %>%
+  filter(loop_type== "ef") %>% 
+  filter(resolution == "2kb")
+
+microc_data_1kb <- strength_data %>% 
+  filter(sample %in% c("control-micro-c", "gd7-micro-c")) %>%
+  filter(loop_type== "ef") %>% 
+  filter(resolution == "1kb")
+
+str_data_to_plot <- bind_rows(hic_data_2kb, microc_data_1kb) %>% 
+  mutate(sample = factor(sample, levels = c("control-nc14", "gd7-nc14", "Tollrm910-nc14",
+                                            "Toll10B-nc14", "control-micro-c", "gd7-micro-c")))
+
+
+str_data_pvals <- str_data_to_plot %>% 
+  group_by(enhancer_sample) %>% 
+  summarise(`gd7-nc14` = format.pval(wilcox.test(score[sample == "control-nc14"], 
+                                          score[sample == "gd7-nc14"])$p.value, digits = 2),
+            `Tollrm910-nc14` = format.pval(wilcox.test(score[sample == "control-nc14"], 
+                                          score[sample == "Tollrm910-nc14"])$p.value, digits = 2),
+            `Toll10B-nc14` = format.pval(wilcox.test(score[sample == "control-nc14"], 
+                                          score[sample == "Toll10B-nc14"])$p.value, digits = 2),
+            `gd7-micro-c` = format.pval(wilcox.test(score[sample == "control-micro-c"], 
+                                          score[sample == "gd7-micro-c"])$p.value, digits = 2)) %>% 
+  tidyr::pivot_longer(-enhancer_sample, names_to = "sample", values_to = "pval")
+
+p <- str_data_to_plot %>% 
+  ggplot(aes(x=sample, y = score, fill = sample)) +
+  geom_boxplot(outlier.shape = NA) +
+  facet_grid(~enhancer_sample) +
+  scale_fill_manual(values = c("control-nc14"="lightgrey", "gd7-nc14"= "#648FFF", "Tollrm910-nc14"="#DC267F",
+                               "Toll10B-nc14"="#FFB000", "control-micro-c"="lightgrey", "gd7-micro-c"="#648FFF")) +
+  geom_text(data=str_data_pvals, aes(label = pval), y = 1, size = 3.5) +
+  theme_bw() +
+  coord_cartesian(ylim = c(-1, 1)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
+  labs(y = "log2(observed/expected)", x = "") +
+  # scale_x_discrete(breaks = c("control-nc14", "gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14", "control-micro-c", "gd7-micro-c"),
+  #                  limits = c("control-nc14", "gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14","", "control-micro-c", "gd7-micro-c")) +
+  scale_x_discrete(labels = c("control", "gd7", "Tollrm9/rm10", "Toll10B", "control", "gd7")) +
+  NULL
+p
+
+```
+
+```{r fig.width=5, fig.height=3}
+hic_data_2kb <- strength_data %>% 
+  filter(sample %in% c("control-nc14", "gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14")) %>%
+  filter(loop_type== "pf") %>% 
+  filter(resolution == "2kb")
+
+microc_data_1kb <- strength_data %>% 
+  filter(sample %in% c("control-micro-c", "gd7-micro-c")) %>%
+  filter(loop_type== "pf") %>% 
+  filter(resolution == "1kb")
+
+str_data_to_plot <- bind_rows(hic_data_2kb, microc_data_1kb) %>% 
+  mutate(sample = factor(sample, levels = c("control-nc14", "gd7-nc14", "Tollrm910-nc14",
+                                            "Toll10B-nc14", "control-micro-c", "gd7-micro-c")))
+
+
+str_data_pvals <- str_data_to_plot %>% 
+  group_by(enhancer_sample) %>% 
+  summarise(`gd7-nc14` = format.pval(wilcox.test(score[sample == "control-nc14"], 
+                                          score[sample == "gd7-nc14"])$p.value, digits = 2),
+            `Tollrm910-nc14` = format.pval(wilcox.test(score[sample == "control-nc14"], 
+                                          score[sample == "Tollrm910-nc14"])$p.value, digits = 2),
+            `Toll10B-nc14` = format.pval(wilcox.test(score[sample == "control-nc14"], 
+                                          score[sample == "Toll10B-nc14"])$p.value, digits = 2),
+            `gd7-micro-c` = format.pval(wilcox.test(score[sample == "control-micro-c"], 
+                                          score[sample == "gd7-micro-c"])$p.value, digits = 2)) %>% 
+  tidyr::pivot_longer(-enhancer_sample, names_to = "sample", values_to = "pval")
+
+p <- str_data_to_plot %>% 
+  ggplot(aes(x=sample, y = score, fill = sample)) +
+  geom_boxplot(outlier.shape = NA) +
+  facet_grid(~enhancer_sample) +
+  scale_fill_manual(values = c("control-nc14"="lightgrey", "gd7-nc14"= "#648FFF", "Tollrm910-nc14"="#DC267F",
+                               "Toll10B-nc14"="#FFB000", "control-micro-c"="lightgrey", "gd7-micro-c"="#648FFF")) +
+  geom_text(data=str_data_pvals, aes(label = pval), y = 1, size = 3.5) +
+  theme_bw() +
+  coord_cartesian(ylim = c(-1.5, 1)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none") +
+  labs(y = "log2(observed/expected)", x = "") +
+  # scale_x_discrete(breaks = c("control-nc14", "gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14", "control-micro-c", "gd7-micro-c"),
+  #                  limits = c("control-nc14", "gd7-nc14", "Tollrm910-nc14", "Toll10B-nc14","", "control-micro-c", "gd7-micro-c")) +
+  scale_x_discrete(labels = c("control", "gd7", "Tollrm9/rm10", "Toll10B", "control", "gd7")) +
+  NULL
+p
+
+```
+
+## Session info
+
+This report was generated at `r format(Sys.time(), "%X, %a %b %d %Y")`. 
+
+```{r}
+devtools::session_info()
+```
+
