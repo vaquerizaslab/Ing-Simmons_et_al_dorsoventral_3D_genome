@@ -1,8 +1,8 @@
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.4542753.svg)](https://doi.org/10.5281/zenodo.4542753)
 
-# Analysis code for Ing-Simmons et al. 2020
+# Analysis code for Ing-Simmons et al. 2021
 
-This repository contains analysis code associated with Ing-Simmons et al. 2020, '[Independence of 3D chromatin conformation and gene regulation during Drosophila dorsoventral patterning](https://www.biorxiv.org/content/10.1101/2020.07.07.186791v1)'.
+This repository contains analysis code associated with Ing-Simmons et al., *Nature Genetics*, 2021, '[Independence of chromatin conformation and gene regulation during Drosophila dorsoventral patterning](https://www.nature.com/articles/s41588-021-00799-x)'.
 
 This code is provided as an enhancement to the Methods described in the paper, in order to increase the reproducibility of our work and help interested readers understand how the analysis was carried out. Please note that while we aim for easy reproducibility, this repository contains the actual code that was developed over time and used for the analysis and may not be a fully self-contained workflow to reproduce all results in the paper. 
 
